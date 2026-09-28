@@ -69,4 +69,4 @@ DEPTH 0.7 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/_MOC]]
+[[CHANGELOG]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Constants/Events]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/Telemetry]] · [[src/PuduLangResilience/_MOC]] · [[subsystems/Strategies]]

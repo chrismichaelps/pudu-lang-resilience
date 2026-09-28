@@ -41,7 +41,7 @@ export fn failureRate(totals: &Info) -> Decimal
 
 ### Linkage
 
-- **Requires:** [[src/PuduLangResilience/Utils/Numeric]], `Std.Decimal`, `Std.List`, `Std.Option`.
+- **Requires:** [[src/PuduLangResilience/Utils/Numeric]], `Std.Decimal`, `Std.List`, `Std.Math`, `Std.Option`.
 - **Consumed by:** [[src/PuduLangResilience/CircuitBreaker]], [[src/PuduLangResilience/Domain/Circuit]].
 
 ## Algorithm
@@ -69,4 +69,4 @@ DEPTH 0.8 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Domain/Circuit]]
+[[CHANGELOG]] · [[domain/Circuit]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Domain/Circuit]] · [[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Utils/Numeric]]

@@ -67,4 +67,4 @@ DEPTH 0.5 (MEDIUM). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Chaos/_MOC]]
+[[src/PuduLangResilience]] · [[src/PuduLangResilience/Chaos]] · [[src/PuduLangResilience/Chaos/_MOC]] · [[src/PuduLangResilience/Constants/Events]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/Telemetry]]

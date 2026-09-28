@@ -26,6 +26,9 @@ with `PUDU_BIN` naming the compiler (default `pudu`).
 ## Negative Logic (Prohibited Paths)
 
 - Every mutated file is restored before the next mutant, whatever the verdict.
+- A mutant whose suites run past 60 seconds counts as killed; a clean run takes about a second.
+- The harness runs on a committed tree only: a run stopped mid-mutant leaves that one change,
+  which `git diff` shows and `git checkout` removes.
 
 ## Grill Log
 
@@ -34,4 +37,4 @@ with `PUDU_BIN` naming the compiler (default `pudu`).
 
 ## Referenced by
 
-[[src/_MOC]] · [[architecture/TESTING]]
+[[architecture/TESTING]] · [[src/_MOC]]

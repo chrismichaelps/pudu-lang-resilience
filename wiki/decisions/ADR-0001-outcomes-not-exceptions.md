@@ -28,4 +28,4 @@ callback's error as `Raised(E)` beside the package's own variants. Callbacks tha
 
 ## Referenced by
 
-[[decisions/_MOC]]
+[[CHANGELOG]] · [[decisions/_MOC]] · [[handoffs/2026-09-28-initial-package]]

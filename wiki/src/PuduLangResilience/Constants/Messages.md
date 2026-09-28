@@ -75,4 +75,4 @@ DEPTH 0.3 (SHALLOW). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Constants/_MOC]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Registry]]
+[[CHANGELOG]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Constants/_MOC]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Registry]]

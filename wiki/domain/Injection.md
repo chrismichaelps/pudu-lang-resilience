@@ -9,4 +9,4 @@ Chaos added to a share of executions: a fault, an outcome, latency, or behavior.
 
 ## Referenced by
 
-[[domain/_MOC]] · [[architecture/LANGUAGE]]
+[[architecture/LANGUAGE]] · [[domain/_MOC]] · [[subsystems/Chaos]]

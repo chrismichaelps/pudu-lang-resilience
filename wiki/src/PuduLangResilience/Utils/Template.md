@@ -52,4 +52,4 @@ DEPTH 0.6 (MEDIUM). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Utils/_MOC]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Registry]]
+[[CHANGELOG]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Constants/Messages]] · [[src/PuduLangResilience/Constants/_MOC]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Registry]] · [[src/PuduLangResilience/Utils/_MOC]]

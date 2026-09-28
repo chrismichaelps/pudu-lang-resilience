@@ -9,4 +9,4 @@ The unit a limiter grants. A request asks for some permits and is granted, queue
 
 ## Referenced by
 
-[[domain/_MOC]] · [[architecture/LANGUAGE]]
+[[architecture/LANGUAGE]] · [[domain/_MOC]]

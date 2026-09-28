@@ -92,4 +92,4 @@ DEPTH 0.7 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/_MOC]]
+[[CHANGELOG]] · [[domain/Pipeline]] · [[src/PuduLangResilience/Constants/Messages]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/Utils/Shared]] · [[src/PuduLangResilience/Utils/Template]] · [[src/PuduLangResilience/_MOC]]

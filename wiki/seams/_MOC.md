@@ -12,4 +12,4 @@ tags: [moc, seam]
 
 ## Referenced by
 
-[[00-INDEX]] · [[architecture/LANGUAGE]]
+[[00-INDEX]]

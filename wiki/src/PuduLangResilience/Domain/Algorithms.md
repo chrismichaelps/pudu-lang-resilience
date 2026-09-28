@@ -39,7 +39,7 @@ export fn shifted(counts: &Array[Int], steps: Int) -> Array[Int]
 
 ### Linkage
 
-- **Requires:** [[src/PuduLangResilience/Domain/Permits]], [[src/PuduLangResilience/Utils/Numeric]].
+- **Requires:** [[src/PuduLangResilience/Domain/Permits]], [[src/PuduLangResilience/Utils/Numeric]], `Std.Math`.
 - **Consumed by:** [[src/PuduLangResilience/Limiter/Concurrency]], [[src/PuduLangResilience/Limiter/FixedWindow]], [[src/PuduLangResilience/Limiter/SlidingWindow]], [[src/PuduLangResilience/Limiter/TokenBucket]].
 
 ## Algorithm
@@ -68,4 +68,4 @@ DEPTH 0.75 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Limiter/Concurrency]] · [[src/PuduLangResilience/Limiter/FixedWindow]] · [[src/PuduLangResilience/Limiter/SlidingWindow]] · [[src/PuduLangResilience/Limiter/TokenBucket]]
+[[src/PuduLangResilience/Domain/Permits]] · [[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Limiter/Concurrency]] · [[src/PuduLangResilience/Limiter/FixedWindow]] · [[src/PuduLangResilience/Limiter/SlidingWindow]] · [[src/PuduLangResilience/Limiter/TokenBucket]] · [[src/PuduLangResilience/Utils/Numeric]] · [[subsystems/Limiting]]

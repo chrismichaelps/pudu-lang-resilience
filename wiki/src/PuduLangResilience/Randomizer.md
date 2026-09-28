@@ -69,4 +69,4 @@ DEPTH 0.6 (MEDIUM). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/_MOC]] · [[src/PuduLangResilience/Chaos]] · [[src/PuduLangResilience/Chaos/Weighted]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Retry]] · [[src/PuduLangResilience/Strategy]]
+[[seams/Runtime]] · [[src/PuduLangResilience/Chaos]] · [[src/PuduLangResilience/Chaos/Weighted]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Retry]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/Utils/Numeric]] · [[src/PuduLangResilience/Utils/Shared]] · [[src/PuduLangResilience/_MOC]]

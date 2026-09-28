@@ -86,4 +86,4 @@ DEPTH 0.8 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/_MOC]]
+[[CHANGELOG]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Constants/Events]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Hedging/Attempts]] · [[src/PuduLangResilience/Predicate]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/Telemetry]] · [[src/PuduLangResilience/_MOC]] · [[subsystems/Strategies]]

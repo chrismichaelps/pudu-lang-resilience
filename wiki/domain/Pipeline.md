@@ -9,4 +9,4 @@ Strategies composed outermost first around a callback, validated as a whole when
 
 ## Referenced by
 
-[[domain/_MOC]] · [[architecture/LANGUAGE]]
+[[architecture/LANGUAGE]] · [[domain/_MOC]]

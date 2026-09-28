@@ -12,4 +12,4 @@ One page per file under `src/`, mirroring it depth for depth. Tools outside `src
 
 ## Referenced by
 
-[[00-INDEX]]
+[[00-INDEX]] · [[handoffs/2026-09-28-initial-package]]

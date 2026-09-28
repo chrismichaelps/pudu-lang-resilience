@@ -9,4 +9,4 @@ One layer of policy: a name unique within its pipeline, a kind, a summary, valid
 
 ## Referenced by
 
-[[domain/_MOC]] · [[architecture/LANGUAGE]]
+[[architecture/LANGUAGE]] · [[domain/_MOC]]

@@ -31,7 +31,7 @@ export fn steady(plan: &Plan, attempt: Int) -> Int
 
 ### Linkage
 
-- **Requires:** [[src/PuduLangResilience/Utils/Numeric]], `Std.Math.Float`, `Std.Option`.
+- **Requires:** [[src/PuduLangResilience/Utils/Numeric]], `Std.Math`, `Std.Math.Float`, `Std.Option`.
 - **Consumed by:** [[src/PuduLangResilience/Retry]].
 
 ## Algorithm
@@ -60,4 +60,4 @@ DEPTH 0.85 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Retry]]
+[[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Retry]] · [[src/PuduLangResilience/Utils/Numeric]]

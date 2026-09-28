@@ -53,4 +53,4 @@ DEPTH 0.5 (MEDIUM). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Telemetry/_MOC]]
+[[src/PuduLangResilience/Telemetry]] · [[src/PuduLangResilience/Telemetry/_MOC]]

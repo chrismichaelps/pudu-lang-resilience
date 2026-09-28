@@ -9,4 +9,4 @@ A dependency's health as a circuit breaker sees it: closed (admitting and counti
 
 ## Referenced by
 
-[[domain/_MOC]] · [[architecture/LANGUAGE]]
+[[architecture/LANGUAGE]] · [[domain/_MOC]]

@@ -24,6 +24,7 @@ corrected in the same change.
 | Monotonic time | `Std.Time` | `elapsed` (milliseconds since an arbitrary origin) |
 | Randomness | `Std.Random` | `fromSeed`, `fromClock`, `below` |
 | Exact ratios | `Std.Decimal` | `fromInt`, `toInt`, `toFloat64`, `parse`, `divide`, `floor` |
+| Integer bounds | `Std.Math` | `min`, `max` |
 | Float math | `Std.Math.Float` | `powf`, `tanh`, `sqrt`, `floor`, `isFinite` |
 | Collections | `Std.List`, `Std.Map` | `List.get`, `List.first`; `Map.get`, `Map.insert`, `Map.remove`, `Map.keys` |
 | Tests | `Std.Test` | `suite`, `equals`, `that`, `not`, `present`, `absent`, `run`, `failuresOf`, `report` |
@@ -95,6 +96,13 @@ corrected in the same change.
 - **`Array.get(i)` and `items[i]` stop the program when `i` is out of range.** Use `List.get` or
   `List.first` for an `Option`.
 - **`scope`, `module`, `where`, and `task` are keywords**; none can name a binding or a field.
+- **`task` is reserved as well**; a binding for a started thread is `started` or `worker`.
+- **Matching a borrowed value binds its parts as owned values.** `case Raised(problem) => show(problem)`
+  over `&Failure[E]`; writing `*problem` is an error.
+- **A unit value is matched as `Ok(_)`, not `Ok(())`.**
+- **A comparison that picks the smaller or larger of two values is `Math.min` or `Math.max`**, not
+  an `if`: the `>` against `>=` choice there cannot change the answer, and mutation testing reports
+  it as a survivor.
 - **`&-1` lexes as the operator `&-`**; borrow a negative literal through a named constant.
 - **A write that depends on a read of a `Sync.Cell` without the cell's mutex** loses updates
   under concurrent use.
@@ -107,4 +115,4 @@ corrected in the same change.
 
 ## Referenced by
 
-[[00-INDEX]] · [[architecture/_MOC]]
+[[00-INDEX]] · [[architecture/_MOC]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Chaos]] · [[src/PuduLangResilience/Chaos/Behavior]] · [[src/PuduLangResilience/Chaos/Fault]] · [[src/PuduLangResilience/Chaos/Latency]] · [[src/PuduLangResilience/Chaos/Outcome]] · [[src/PuduLangResilience/Chaos/Weighted]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Constants/Events]] · [[src/PuduLangResilience/Constants/Messages]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Domain/Algorithms]] · [[src/PuduLangResilience/Domain/Backoff]] · [[src/PuduLangResilience/Domain/Circuit]] · [[src/PuduLangResilience/Domain/Health]] · [[src/PuduLangResilience/Domain/Permits]] · [[src/PuduLangResilience/Fallback]] · [[src/PuduLangResilience/Hedging]] · [[src/PuduLangResilience/Hedging/Attempts]] · [[src/PuduLangResilience/Limiter]] · [[src/PuduLangResilience/Limiter/Concurrency]] · [[src/PuduLangResilience/Limiter/Engine]] · [[src/PuduLangResilience/Limiter/FixedWindow]] · [[src/PuduLangResilience/Limiter/Partitioned]] · [[src/PuduLangResilience/Limiter/SlidingWindow]] · [[src/PuduLangResilience/Limiter/TokenBucket]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/Predicate]] · [[src/PuduLangResilience/Randomizer]] · [[src/PuduLangResilience/RateLimiter]] · [[src/PuduLangResilience/Registry]] · [[src/PuduLangResilience/Retry]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/Telemetry]] · [[src/PuduLangResilience/Telemetry/Log]] · [[src/PuduLangResilience/Telemetry/Meter]] · [[src/PuduLangResilience/Timeout]] · [[src/PuduLangResilience/Utils/Numeric]] · [[src/PuduLangResilience/Utils/Shared]] · [[src/PuduLangResilience/Utils/Template]] · [[tools/Mutate]]

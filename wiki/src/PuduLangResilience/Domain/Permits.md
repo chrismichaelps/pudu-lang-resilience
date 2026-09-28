@@ -97,4 +97,4 @@ DEPTH 0.85 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Domain/Algorithms]] · [[src/PuduLangResilience/Limiter/Engine]]
+[[CHANGELOG]] · [[domain/Permit]] · [[src/PuduLangResilience/Domain/Algorithms]] · [[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Limiter/Engine]] · [[src/PuduLangResilience/Utils/Numeric]] · [[subsystems/Limiting]]

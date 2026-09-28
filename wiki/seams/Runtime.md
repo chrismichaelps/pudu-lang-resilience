@@ -27,4 +27,4 @@ cancellable pauses still use `Std.Concurrent.Cancel` deadlines on the system clo
 
 ## Referenced by
 
-[[seams/_MOC]] · [[grammar/pudu]] · [[src/PuduLangResilience/Clock]] · [[decisions/ADR-0002-injected-runtime]]
+[[CHANGELOG]] · [[architecture/LANGUAGE]] · [[architecture/_MOC]] · [[decisions/ADR-0002-injected-runtime]] · [[grammar/pudu]] · [[seams/_MOC]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/_MOC]]

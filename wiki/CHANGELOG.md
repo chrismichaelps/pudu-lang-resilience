@@ -27,7 +27,15 @@ tags: [changelog]
   filled in one pass by [[src/PuduLangResilience/Utils/Template]].
 - Suites for every module, a package layout test, an integration scenario, runnable examples, and
   mutation testing of the pure layer ([[architecture/TESTING]]).
+- Mutation testing of `Domain/` first killed 59 of 86 mutants. Min and max comparisons became
+  `Math.min` and `Math.max`, guards that could not change an answer were removed, and new checks
+  pin replenishment by hand, how successes count, exact window and period boundaries, eviction
+  bookkeeping, and newest-first admission; the pass now kills 75 of 75
+  ([[src/PuduLangResilience/Domain/Permits]], [[src/PuduLangResilience/Domain/Health]]).
+- The hedging delay generator is asked once per attempt ([[src/PuduLangResilience/Hedging]]).
+- The vault was reconciled with the code: signatures regenerated from source, every link
+  resolved, and every "Referenced by" rebuilt from the link graph.
 
 ## Referenced by
 
-[[00-INDEX]]
+[[00-INDEX]] · [[handoffs/2026-09-28-initial-package]]

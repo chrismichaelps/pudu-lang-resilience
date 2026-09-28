@@ -38,4 +38,4 @@ only toward the core: strategies use `Pipeline`'s types through `Strategy`, neve
 
 ## Referenced by
 
-[[00-INDEX]] · [[grammar/pudu]]
+[[00-INDEX]]

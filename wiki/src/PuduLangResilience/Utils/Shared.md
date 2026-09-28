@@ -60,4 +60,4 @@ DEPTH 0.7 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Utils/_MOC]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Hedging/Attempts]] · [[src/PuduLangResilience/Limiter]] · [[src/PuduLangResilience/Limiter/Engine]] · [[src/PuduLangResilience/Limiter/Partitioned]] · [[src/PuduLangResilience/Randomizer]] · [[src/PuduLangResilience/Registry]] · [[src/PuduLangResilience/Telemetry/Meter]]
+[[architecture/_MOC]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Hedging/Attempts]] · [[src/PuduLangResilience/Limiter]] · [[src/PuduLangResilience/Limiter/Engine]] · [[src/PuduLangResilience/Limiter/Partitioned]] · [[src/PuduLangResilience/Randomizer]] · [[src/PuduLangResilience/Registry]] · [[src/PuduLangResilience/Telemetry/Meter]] · [[src/PuduLangResilience/Utils/_MOC]]

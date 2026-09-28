@@ -63,4 +63,4 @@ DEPTH 0.6 (MEDIUM). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Utils/_MOC]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Domain/Algorithms]] · [[src/PuduLangResilience/Domain/Backoff]] · [[src/PuduLangResilience/Domain/Circuit]] · [[src/PuduLangResilience/Domain/Health]] · [[src/PuduLangResilience/Domain/Permits]] · [[src/PuduLangResilience/Randomizer]]
+[[grammar/pudu]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Domain/Algorithms]] · [[src/PuduLangResilience/Domain/Backoff]] · [[src/PuduLangResilience/Domain/Circuit]] · [[src/PuduLangResilience/Domain/Health]] · [[src/PuduLangResilience/Domain/Permits]] · [[src/PuduLangResilience/Randomizer]] · [[src/PuduLangResilience/Utils/_MOC]]

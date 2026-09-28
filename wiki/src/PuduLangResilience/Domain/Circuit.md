@@ -53,7 +53,7 @@ export fn retryAfter(machine: &Machine, now: Int) -> Int
 
 ### Linkage
 
-- **Requires:** [[src/PuduLangResilience/Domain/Health]], [[src/PuduLangResilience/Utils/Numeric]], `Std.Decimal`.
+- **Requires:** [[src/PuduLangResilience/Domain/Health]], [[src/PuduLangResilience/Utils/Numeric]], `Std.Decimal`, `Std.Math`.
 - **Consumed by:** [[src/PuduLangResilience/CircuitBreaker]].
 
 ## Algorithm
@@ -82,4 +82,4 @@ DEPTH 0.85 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/CircuitBreaker]]
+[[domain/Circuit]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Domain/Health]] · [[src/PuduLangResilience/Domain/_MOC]] · [[src/PuduLangResilience/Utils/Numeric]]

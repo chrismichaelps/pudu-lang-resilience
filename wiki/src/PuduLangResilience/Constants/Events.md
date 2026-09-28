@@ -79,4 +79,4 @@ DEPTH 0.3 (SHALLOW). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Constants/_MOC]] · [[src/PuduLangResilience/Chaos/Behavior]] · [[src/PuduLangResilience/Chaos/Fault]] · [[src/PuduLangResilience/Chaos/Latency]] · [[src/PuduLangResilience/Chaos/Outcome]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Fallback]] · [[src/PuduLangResilience/Hedging]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/RateLimiter]] · [[src/PuduLangResilience/Retry]] · [[src/PuduLangResilience/Timeout]]
+[[src/PuduLangResilience/Chaos/Behavior]] · [[src/PuduLangResilience/Chaos/Fault]] · [[src/PuduLangResilience/Chaos/Latency]] · [[src/PuduLangResilience/Chaos/Outcome]] · [[src/PuduLangResilience/CircuitBreaker]] · [[src/PuduLangResilience/Constants/_MOC]] · [[src/PuduLangResilience/Fallback]] · [[src/PuduLangResilience/Hedging]] · [[src/PuduLangResilience/Pipeline]] · [[src/PuduLangResilience/RateLimiter]] · [[src/PuduLangResilience/Retry]] · [[src/PuduLangResilience/Timeout]]

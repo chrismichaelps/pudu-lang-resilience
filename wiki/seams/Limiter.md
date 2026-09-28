@@ -23,4 +23,4 @@ Every lease is released once, whatever the callback answers.
 
 ## Referenced by
 
-[[seams/_MOC]] · [[architecture/LANGUAGE]]
+[[architecture/LANGUAGE]] · [[seams/_MOC]] · [[subsystems/Limiting]]

@@ -101,4 +101,4 @@ DEPTH 0.8 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/_MOC]] · [[src/PuduLangResilience/Registry]]
+[[CHANGELOG]] · [[architecture/_MOC]] · [[domain/Pipeline]] · [[src/PuduLangResilience]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Constants/Events]] · [[src/PuduLangResilience/Constants/Messages]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Randomizer]] · [[src/PuduLangResilience/Registry]] · [[src/PuduLangResilience/Strategy]] · [[src/PuduLangResilience/Telemetry]] · [[src/PuduLangResilience/Utils/Template]] · [[src/PuduLangResilience/_MOC]]

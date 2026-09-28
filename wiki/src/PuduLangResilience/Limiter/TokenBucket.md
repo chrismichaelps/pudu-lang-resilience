@@ -65,4 +65,4 @@ DEPTH 0.4 (MEDIUM). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Limiter/_MOC]]
+[[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Domain/Algorithms]] · [[src/PuduLangResilience/Limiter]] · [[src/PuduLangResilience/Limiter/Engine]] · [[src/PuduLangResilience/Limiter/_MOC]]

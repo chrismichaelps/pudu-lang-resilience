@@ -28,4 +28,4 @@ attempts and joins every thread before it answers.
 
 ## Referenced by
 
-[[decisions/_MOC]] · [[seams/Runtime]]
+[[CHANGELOG]] · [[decisions/_MOC]] · [[handoffs/2026-09-28-initial-package]] · [[seams/Runtime]]

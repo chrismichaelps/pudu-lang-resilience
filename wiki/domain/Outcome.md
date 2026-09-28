@@ -9,4 +9,4 @@ The answer of every callback and strategy: `Ok(value)` or `Err(failure)`. A fail
 
 ## Referenced by
 
-[[domain/_MOC]] · [[architecture/LANGUAGE]]
+[[architecture/LANGUAGE]] · [[domain/_MOC]]

@@ -70,4 +70,4 @@ DEPTH 0.5 (MEDIUM). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/_MOC]] · [[src/PuduLangResilience/Chaos/Behavior]] · [[src/PuduLangResilience/Chaos/Fault]] · [[src/PuduLangResilience/Chaos/Latency]] · [[src/PuduLangResilience/Chaos/Outcome]] · [[src/PuduLangResilience/Chaos/Weighted]]
+[[domain/Injection]] · [[src/PuduLangResilience/Chaos/Behavior]] · [[src/PuduLangResilience/Chaos/Fault]] · [[src/PuduLangResilience/Chaos/Latency]] · [[src/PuduLangResilience/Chaos/Outcome]] · [[src/PuduLangResilience/Chaos/Weighted]] · [[src/PuduLangResilience/Context]] · [[src/PuduLangResilience/Randomizer]] · [[src/PuduLangResilience/_MOC]] · [[subsystems/Chaos]]

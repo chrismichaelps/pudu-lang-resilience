@@ -55,4 +55,4 @@ DEPTH 0.75 (DEEP). Tested by the suite mirroring this module under `test/`.
 
 ## Referenced by
 
-[[src/PuduLangResilience/Limiter/_MOC]] · [[src/PuduLangResilience/Limiter/Concurrency]] · [[src/PuduLangResilience/Limiter/FixedWindow]] · [[src/PuduLangResilience/Limiter/SlidingWindow]] · [[src/PuduLangResilience/Limiter/TokenBucket]]
+[[seams/Limiter]] · [[src/PuduLangResilience/Clock]] · [[src/PuduLangResilience/Domain/Permits]] · [[src/PuduLangResilience/Limiter]] · [[src/PuduLangResilience/Limiter/Concurrency]] · [[src/PuduLangResilience/Limiter/FixedWindow]] · [[src/PuduLangResilience/Limiter/SlidingWindow]] · [[src/PuduLangResilience/Limiter/TokenBucket]] · [[src/PuduLangResilience/Limiter/_MOC]] · [[src/PuduLangResilience/Utils/Shared]] · [[subsystems/Limiting]]
