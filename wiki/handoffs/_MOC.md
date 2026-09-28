@@ -5,7 +5,7 @@ tags: [moc, handoff]
 
 # Handoffs
 
-- [[handoffs/2026-09-28-initial-package]] — awaiting release: the initial package is merged; `pudu release 0.1.0` remains.
+- [[handoffs/2026-09-28-initial-package]] — complete: 0.1.0 released as `v0.1.0`.
 
 ## Referenced by
 
