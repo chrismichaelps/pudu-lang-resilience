@@ -1,0 +1,110 @@
+/** @Resilience.Predicate.Module — which outcomes a reactive strategy handles */
+module PuduLangResilience.Predicate
+
+import PuduLangResilience.Context as Context
+import PuduLangResilience as Resilience
+
+/** @Resilience.Predicate.Arguments — the outcome being judged and where it arose */
+export type Arguments[T, E] = { outcome: Resilience.Outcome[T, E], context: Context.Context, attempt: Int }
+
+/** @Resilience.Predicate.Predicate — answers whether a strategy handles an outcome */
+export type Predicate[T, E] = fn(Arguments[T, E]) -> Bool
+
+/// The arguments for judging one outcome. `attempt` counts from 0 for the first execution.
+export fn arguments[T, E](outcome: Resilience.Outcome[T, E], context: Context.Context, attempt: Int) -> Arguments[T, E] {
+  Arguments{outcome: outcome, context: context, attempt: attempt}
+}
+
+/// Whether `test` handles the outcome.
+export fn handles[T, E](test: &Predicate[T, E], given: &Arguments[T, E]) -> Bool { (*test)(*given) }
+
+/// Every failure except a cancellation; no value. The default of every reactive strategy.
+export fn failures[T, E]() -> Predicate[T, E] {
+  fn(given: Arguments[T, E]) -> Bool {
+    match given.outcome {
+      case Ok(_) => false
+      case Err(found) => !Resilience.isCancellation(&found)
+    }
+  }
+}
+
+/// The callback's own errors that `test` accepts.
+export fn raised[T, E](test: fn(E) -> Bool) -> Predicate[T, E] {
+  fn(given: Arguments[T, E]) -> Bool {
+    match given.outcome {
+      case Err(Resilience.Raised(problem)) => test(problem)
+      case _ => false
+    }
+  }
+}
+
+/// Every error the callback raises itself.
+export fn anyRaised[T, E]() -> Predicate[T, E] { raised(fn(_problem: E) -> Bool { true }) }
+
+/// The failures, of any kind, that `test` accepts.
+export fn failure[T, E](test: fn(Resilience.Failure[E]) -> Bool) -> Predicate[T, E] {
+  fn(given: Arguments[T, E]) -> Bool {
+    match given.outcome {
+      case Err(found) => test(found)
+      case Ok(_) => false
+    }
+  }
+}
+
+/// The values that `test` accepts.
+export fn results[T, E](test: fn(T) -> Bool) -> Predicate[T, E] {
+  fn(given: Arguments[T, E]) -> Bool {
+    match given.outcome {
+      case Ok(value) => test(value)
+      case Err(_) => false
+    }
+  }
+}
+
+/// The values equal to `expected`.
+export fn result[T, E](expected: T) -> Predicate[T, E] { results(fn(value: T) -> Bool { value == expected }) }
+
+/// Rejections by a timeout strategy.
+export fn timeouts[T, E]() -> Predicate[T, E] {
+  failure(fn(found: Resilience.Failure[E]) -> Bool {
+      match found {
+        case Resilience.TimedOut(_) => true
+        case _ => false
+      }
+    })
+}
+
+/// Rejections by an open or isolated circuit.
+export fn brokenCircuits[T, E]() -> Predicate[T, E] {
+  failure(fn(found: Resilience.Failure[E]) -> Bool {
+      match found {
+        case Resilience.BrokenCircuit(_) => true
+        case Resilience.IsolatedCircuit => true
+        case _ => false
+      }
+    })
+}
+
+/// Rejections by a rate limiter.
+export fn rateLimited[T, E]() -> Predicate[T, E] {
+  failure(fn(found: Resilience.Failure[E]) -> Bool {
+      match found {
+        case Resilience.RateLimited(_) => true
+        case _ => false
+      }
+    })
+}
+
+/// Outcomes that any of `tests` handles; none when `tests` is empty.
+export fn anyOf[T, E](tests: &Array[Predicate[T, E]]) -> Predicate[T, E] {
+  let all = *tests
+  fn(given: Arguments[T, E]) -> Bool {
+    for test in all {
+      if test(given) { return true }
+    }
+    false
+  }
+}
+
+/// Handles nothing.
+export fn never[T, E]() -> Predicate[T, E] { fn(_given: Arguments[T, E]) -> Bool { false } }

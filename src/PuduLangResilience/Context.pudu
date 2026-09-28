@@ -1,0 +1,119 @@
+/** @Resilience.Context.Carrier — per-execution key, token, and properties */
+module PuduLangResilience.Context
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Decimal as Decimal
+import Std.Map as Map
+import Std.Option as Option
+import PuduLangResilience as Resilience
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Resilience.Context.Context — what one execution carries through a pipeline */
+export type Context = {
+  operationKey: Option[Str],
+  token: Cancel.Token,
+  properties: Shared.Shared[Map[Str, Str]]
+}
+
+/** @Resilience.Context.Key — a typed name for one property */
+export type Key[T] = { name: Str, encode: fn(T) -> Str, decode: fn(Str) -> Option[T] }
+
+/// A context with no operation key, a token that fires only when cancelled, and no properties.
+export fn create() -> Context {
+  Context{operationKey: None, token: Cancel.token(), properties: Shared.shared(Map.empty())}
+}
+
+/// A fresh context naming the operation it runs.
+export fn keyed(operationKey: Str) -> Context { Context{..create(), operationKey: Some(operationKey)} }
+
+/// A fresh context whose execution stops when `token` fires.
+export fn cancellable(token: Cancel.Token) -> Context { Context{..create(), token: token} }
+
+/// The same context observing another token; properties stay shared with the original.
+export fn withToken(source: &Context, token: Cancel.Token) -> Context { Context{..*source, token: token} }
+
+/// A copy of the context observing another token, with a separate copy of its properties.
+export fn fork(source: &Context, token: Cancel.Token) -> Context {
+  Context{..*source, token: token, properties: Shared.shared(Shared.current(&source.properties))}
+}
+
+/// Copies every property of `source` into `target`, replacing properties of the same name.
+export fn adopt(target: &Context, source: &Context) -> () {
+  let incoming = Shared.current(&source.properties)
+  Shared.update(&target.properties, fn(held: Map[Str, Str]) -> Map[Str, Str] { Map.merge(&held, &incoming) })
+}
+
+/// A key whose values are written with `encode` and read back with `decode`.
+export fn key[T](name: Str, encode: fn(T) -> Str, decode: fn(Str) -> Option[T]) -> Key[T] {
+  Key{name: name, encode: encode, decode: decode}
+}
+
+/// A key holding text.
+export fn textKey(name: Str) -> Key[Str] {
+  key(name, fn(value: Str) -> Str { value }, fn(text: Str) -> Option[Str] { Some(text) })
+}
+
+/// A key holding a whole number.
+export fn intKey(name: Str) -> Key[Int] {
+  key(name, fn(value: Int) -> Str { show(value) }, fn(text: Str) -> Option[Int] {
+      Option.andThen(Decimal.parse(text), fn(exact: Decimal) -> Option[Int] { Decimal.toInt(exact) })
+    })
+}
+
+/// A key holding a truth value.
+export fn boolKey(name: Str) -> Key[Bool] {
+  key(name, fn(value: Bool) -> Str { if value { "true" } else { "false" } }, fn(text: Str) -> Option[Bool] {
+      if text == "true" { Some(true) } else if text == "false" { Some(false) } else { None }
+    })
+}
+
+/// Stores a property, replacing any value under the same name.
+export fn set[T](target: &Context, name: &Key[T], value: T) -> () {
+  let text = (name.encode)(value)
+  let field = name.name
+  Shared.update(&target.properties, fn(held: Map[Str, Str]) -> Map[Str, Str] { Map.insert(&held, field, text) })
+}
+
+/// The property under a key, when it is present and reads back as the key's type.
+export fn get[T](source: &Context, name: &Key[T]) -> Option[T] {
+  Option.andThen(Map.get(&Shared.current(&source.properties), name.name), name.decode)
+}
+
+/// The property under a key, or `fallback` when it is absent or unreadable.
+export fn getOr[T](source: &Context, name: &Key[T], fallback: T) -> T { Option.unwrapOr(get(source, name), fallback) }
+
+/// Whether a property is stored under the key's name.
+export fn has[T](source: &Context, name: &Key[T]) -> Bool {
+  Map.containsKey(&Shared.current(&source.properties), name.name)
+}
+
+/// Removes the property under a key.
+export fn remove[T](target: &Context, name: &Key[T]) -> () {
+  let field = name.name
+  Shared.update(&target.properties, fn(held: Map[Str, Str]) -> Map[Str, Str] { Map.remove(&held, field) })
+}
+
+/// The names of every stored property, in order.
+export fn names(source: &Context) -> Array[Str] { Map.keys(&Shared.current(&source.properties)) }
+
+/// Asks the execution holding this context to stop. The first reason given is kept.
+export fn cancel(target: &Context, why: Str) -> () { let _cancelled = Cancel.cancel(&target.token, why) }
+
+/// Whether the context's token has fired.
+export fn stopped(source: &Context) -> Bool { Cancel.stopped(&source.token) }
+
+/// `Ok` while the token has not fired, and `Cancelled` once it has, so a callback stops with `?`.
+export fn check[E](source: &Context) -> Result[(), Resilience.Failure[E]] {
+  match Cancel.check(&source.token) {
+    case Ok(_) => Ok(())
+    case Err(why) => Err(Resilience.Cancelled(Cancel.explain(&why)))
+  }
+}
+
+/// Sleeps `millis` on the system clock, or answers `Cancelled` as soon as the token fires.
+export fn pause[E](source: &Context, millis: Int) -> Result[(), Resilience.Failure[E]] {
+  match Cancel.pause(&source.token, millis) {
+    case Ok(_) => Ok(())
+    case Err(why) => Err(Resilience.Cancelled(Cancel.explain(&why)))
+  }
+}

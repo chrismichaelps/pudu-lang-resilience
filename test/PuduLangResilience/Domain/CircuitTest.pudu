@@ -1,0 +1,71 @@
+/** @Test.Domain.Circuit.Suite — health windows and circuit transitions */
+module PuduLangResilience.Domain.CircuitTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience.Domain.Circuit as Circuit
+import PuduLangResilience.Domain.Health as Health
+
+/// Runs the suite.
+fn main() -> Int {
+  let health = Health.create(1000)
+  let recorded = Health.record(&Health.record(&Health.record(&health, 0, true), 50, false), 150, true)
+  let later = Health.record(&recorded, 1060, false)
+  let single = Health.create(100)
+  let thresholds = Circuit.Thresholds{failureRatio: 0.5d, minimumThroughput: 2}
+  let start = Circuit.closed(1000)
+  let once = Circuit.failed(&start, 0, "a", &thresholds)
+  let twice = Circuit.failed(&once[0], 10, "b", &thresholds)
+  let opened = Circuit.open(&twice[0], 10, 500)
+  let early = Circuit.admit(&opened, 300, 500)
+  let probing = Circuit.admit(&opened, 510, 500)
+  let second = Circuit.admit(&probing[0], 520, 500)
+  let probeFailed = Circuit.failed(&probing[0], 530, "c", &thresholds)
+  let probeSucceeded = Circuit.succeeded(&probing[0], 530)
+  let isolated = Circuit.isolate(&start)
+  let lenient = Circuit.Thresholds{failureRatio: 0.6d, minimumThroughput: 2}
+  let afterSuccess = Circuit.succeeded(&start, 0)[0]
+  let mixed = Circuit.failed(&afterSuccess, 1, "e", &lenient)
+  let failedWhileOpen = Circuit.failed(&opened, 20, "f", &thresholds)
+  let checks = Test.suite("Domain.Circuit", &[
+      Test.not("successes lower the failure share", mixed[1]),
+      Test.equals("a success is counted as one", &Health.info(&mixed[0].health, 1), &Health.Info{throughput: 2, failures: 1}),
+      Test.equals("a failure while open is counted", &Health.info(&failedWhileOpen[0].health, 20).failures, &3),
+      Test.equals("a period of exactly ten resolutions is split", &Health.create(200).windowLength, &20),
+      Test.equals("an outcome exactly one period old is not counted", &Health.info(&Health.record(&health, 0, true), 1000).throughput, &0),
+      Test.equals("an outcome a whole window later starts a window", &Health.record(&Health.record(&health, 0, true), 100, true).windows.length(), &2),
+      Test.equals("a window exactly one period old is dropped", &Health.record(&Health.record(&health, 0, true), 1000, true).windows.length(), &1),
+      Test.equals("a zero period keeps windows of one millisecond", &Health.create(0).windowLength, &1),
+      Test.equals("a period of a second is split into tenths", &health.windowLength, &100),
+      Test.equals("a period shorter than ten resolutions keeps one window", &single.windowLength, &100),
+      Test.equals("outcomes in the period are totalled", &Health.info(&recorded, 150), &Health.Info{throughput: 3, failures: 2}),
+      Test.equals("outcomes past the period are dropped", &Health.info(&later, 1060), &Health.Info{throughput: 2, failures: 1}),
+      Test.equals("an outcome in the same window joins it", &Health.record(&health, 0, true).windows.length(), &1),
+      Test.equals("the failure rate is exact", &Health.failureRate(&Health.Info{throughput: 3, failures: 1}), &0.333333d),
+      Test.equals("no throughput is no failure rate", &Health.failureRate(&Health.Info{throughput: 0, failures: 0}), &0d),
+      Test.not("the minimum throughput must be reached", Health.shouldBreak(&Health.Info{throughput: 1, failures: 1}, 0.5d, 2)),
+      Test.that("the ratio is inclusive", Health.shouldBreak(&Health.Info{throughput: 4, failures: 2}, 0.5d, 2)),
+      Test.not("a lower share does not break", Health.shouldBreak(&Health.Info{throughput: 5, failures: 2}, 0.5d, 2)),
+      Test.equals("a reset empties the windows", &Health.reset(&recorded).windows, &[]),
+      Test.not("one failure below the throughput keeps the circuit closed", once[1]),
+      Test.that("the failure meeting the thresholds opens the circuit", twice[1]),
+      Test.equals("an open circuit blocks until its deadline", &early[1], &Circuit.Blocked(210)),
+      Test.equals("the first execution past the deadline is the probe", &probing[1], &Circuit.Probe),
+      Test.equals("a probe counts one half-open attempt", &probing[0].halfOpenAttempts, &1),
+      Test.equals("a half-open circuit blocks everything but the probe", &second[1], &Circuit.Blocked(490)),
+      Test.that("a failed probe opens again", probeFailed[1]),
+      Test.equals("a failed probe is not counted", &Health.info(&probeFailed[0].health, 530).throughput, &2),
+      Test.that("a successful probe closes the circuit", probeSucceeded[1] && probeSucceeded[0].phase == Circuit.Closed),
+      Test.equals("closing clears the counts and attempts", &(probeSucceeded[0].health.windows, probeSucceeded[0].halfOpenAttempts), &([], 0)),
+      Test.equals("an isolated circuit refuses", &Circuit.admit(&isolated, 99999, 500)[1], &Circuit.Refused),
+      Test.not("an isolated circuit does not open again on failure", Circuit.failed(&isolated, 0, "d", &thresholds)[1]),
+      Test.not("a success in a closed circuit closes nothing", Circuit.succeeded(&start, 0)[1]),
+      Test.equals("a negative duration opens until now", &Circuit.open(&start, 40, -5).blockedUntil, &40),
+      Test.equals("retry-after is never negative", &Circuit.retryAfter(&opened, 9999), &0)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

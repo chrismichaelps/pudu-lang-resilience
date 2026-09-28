@@ -1,0 +1,65 @@
+/** @Test.Context.Suite — keys, typed properties, forks, and cancellation */
+module PuduLangResilience.ContextTest
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience.Context as Context
+import PuduLangResilience as Resilience
+
+/// Runs the suite.
+fn main() -> Int {
+  let context = Context.keyed("orders")
+  let attempts = Context.intKey("attempts")
+  let region = Context.textKey("region")
+  let cached = Context.boolKey("cached")
+  let point = Context.key("point", fn(value: (Int, Int)) -> Str { show(value[0]) + "," + show(value[1]) }, fn(_text: Str) -> Option[(Int, Int)] { None })
+  Context.set(&context, &attempts, -3)
+  Context.set(&context, &region, "eu")
+  Context.set(&context, &cached, false)
+  Context.set(&context, &point, (1, 2))
+  let shared = Context.withToken(&context, Cancel.token())
+  Context.set(&shared, &region, "us")
+  let seenThroughOriginal = Context.get(&context, &region)
+  let forked = Context.fork(&context, Cancel.token())
+  Context.set(&forked, &region, "ap")
+  Context.set(&forked, &Context.textKey("forked-only"), "yes")
+  let beforeAdopt = Context.get(&context, &Context.textKey("forked-only"))
+  Context.adopt(&context, &forked)
+  Context.remove(&context, &cached)
+  let flagged = Context.create()
+  Context.set(&flagged, &Context.textKey("cached"), "maybe")
+  let stopping = Context.create()
+  let beforeCancel: Result[(), Resilience.Failure[Str]] = Context.check(&stopping)
+  Context.cancel(&stopping, "done")
+  Context.cancel(&stopping, "later")
+  let afterCancel: Result[(), Resilience.Failure[Str]] = Context.check(&stopping)
+  let paused: Result[(), Resilience.Failure[Str]] = Context.pause(&stopping, 1000)
+  let quick: Result[(), Resilience.Failure[Str]] = Context.pause(&Context.create(), 1)
+  let checks = Test.suite("Context", &[
+      Test.equals("a keyed context names its operation", &context.operationKey, &Some("orders")),
+      Test.equals("a fresh context names no operation", &Context.create().operationKey, &None),
+      Test.equals("a whole number reads back", &Context.get(&context, &attempts), &Some(-3)),
+      Test.equals("a false flag reads back before removal", &Context.get(&flagged, &cached), &None),
+      Test.equals("a value that does not decode reads as absent", &Context.get(&context, &point), &None),
+      Test.that("an undecodable value is still stored", Context.has(&context, &point)),
+      Test.equals("getOr falls back for an absent key", &Context.getOr(&context, &Context.intKey("missing"), 7), &7),
+      Test.equals("a context with another token shares properties", &seenThroughOriginal, &Some("us")),
+      Test.equals("a fork starts from a copy", &Context.get(&forked, &attempts), &Some(-3)),
+      Test.equals("a fork's changes stay in the fork", &beforeAdopt, &None),
+      Test.equals("adopting copies the fork's properties", &(Context.get(&context, &region), Context.get(&context, &Context.textKey("forked-only"))), &(Some("ap"), Some("yes"))),
+      Test.not("a removed property is gone", Context.has(&context, &cached)),
+      Test.equals("every stored name is listed", &Context.names(&context), &["attempts", "forked-only", "point", "region"]),
+      Test.equals("a context whose token has not fired checks out", &beforeCancel, &Ok(())),
+      Test.that("a cancelled context is stopped", Context.stopped(&stopping)),
+      Test.equals("the first cancellation reason is kept", &afterCancel, &Err(Resilience.Cancelled("cancelled: done"))),
+      Test.equals("a pause on a cancelled context ends at once", &paused, &Err(Resilience.Cancelled("cancelled: done"))),
+      Test.equals("a short pause completes", &quick, &Ok(())),
+      Test.equals("a cancellable context observes its token", &Context.stopped(&Context.cancellable(Cancel.expiring(0))), &true)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

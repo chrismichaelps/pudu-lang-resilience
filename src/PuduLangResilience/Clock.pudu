@@ -1,0 +1,62 @@
+/** @Resilience.Clock.Seam — monotonic time and cancellable waiting */
+module PuduLangResilience.Clock
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Sync as Sync
+import Std.Time as Time
+import PuduLangResilience.Utils.Numeric as Numeric
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Resilience.Clock.Clock — reads time and waits in milliseconds */
+export type Clock = {
+  now: fn() -> Int,
+  sleep: fn(Int, Cancel.Token) -> Result[(), Cancel.Reason]
+}
+
+/** @Resilience.Clock.Manual — time that moves only when told */
+export type Manual = { time: Shared.Shared[Int], slept: Shared.Shared[Array[Int]] }
+
+/// The monotonic clock of the running program. Waiting ends early when the token fires.
+export fn system() -> Clock {
+  Clock {
+    now: fn() -> Int { Time.elapsed() },
+    sleep: fn(millis: Int, token: Cancel.Token) -> Result[(), Cancel.Reason] { Cancel.pause(&token, millis) }
+  }
+}
+
+/// A manual clock reading `start` milliseconds until it is advanced.
+export fn manual(start: Int) -> Manual { Manual{time: Shared.shared(start), slept: Shared.shared([])} }
+
+/// A clock driven by a manual clock. Waiting records the requested wait and advances the manual
+/// clock by it at once; it answers the token's reason when the token has fired.
+export fn ofManual(source: &Manual) -> Clock {
+  let time = source.time
+  let slept = source.slept
+  Clock {
+    now: fn() -> Int { Shared.current(&time) },
+    sleep: fn(millis: Int, token: Cancel.Token) -> Result[(), Cancel.Reason] {
+      Cancel.check(&token) ?
+      let wait = if millis < 0 { 0 } else { millis }
+      Shared.update(&slept, fn(waits: Array[Int]) -> Array[Int] { waits.push(wait) })
+      Shared.update(&time, fn(held: Int) -> Int { Numeric.add(held, wait) })
+      Ok(())
+    }
+  }
+}
+
+/// Moves a manual clock forward by `millis`; a negative amount moves it by nothing.
+export fn advance(target: &Manual, millis: Int) -> () {
+  let step = if millis < 0 { 0 } else { millis }
+  Shared.update(&target.time, fn(held: Int) -> Int { Numeric.add(held, step) })
+}
+
+/// Every wait requested of a manual clock, oldest first.
+export fn sleeps(source: &Manual) -> Array[Int] { Shared.current(&source.slept) }
+
+/// The clock's reading, in milliseconds.
+export fn now(source: &Clock) -> Int { (source.now)() }
+
+/// Waits `millis` on the clock, or until the token fires; the token's reason when it fired.
+export fn sleep(source: &Clock, millis: Int, token: &Cancel.Token) -> Result[(), Cancel.Reason] {
+  (source.sleep)(millis, *token)
+}

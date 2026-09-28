@@ -1,0 +1,51 @@
+/** @Resilience.Chaos.Module — when a chaos strategy injects */
+module PuduLangResilience.Chaos
+
+import Std.Decimal as Decimal
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Randomizer as Randomizer
+
+/** @Resilience.Chaos.Injection — how often, and whether, chaos is injected */
+export type Injection = {
+  rate: Decimal,
+  rateGenerator: Option[fn(Context.Context) -> Decimal],
+  enabled: Bool,
+  enabledGenerator: Option[fn(Context.Context) -> Bool]
+}
+
+/** @Resilience.Chaos.Arguments — what a chaos generator decides from */
+export type Arguments = { context: Context.Context, randomizer: Randomizer.Randomizer }
+
+/// Enabled, injecting into one execution in a thousand.
+export fn defaults() -> Injection { Injection{rate: 0.001d, rateGenerator: None, enabled: true, enabledGenerator: None} }
+
+/// Enabled, injecting into every execution.
+export fn always() -> Injection { Injection{..defaults(), rate: 1d} }
+
+/// Enabled, injecting into the given share of executions, from 0 to 1.
+export fn atRate(rate: Decimal) -> Injection { Injection{..defaults(), rate: rate} }
+
+/// Every reason the injection settings cannot be followed.
+export fn validate(injection: &Injection) -> Array[Str] {
+  if injection.rate < 0d || injection.rate > 1d { ["rate must be from 0 to 1"] } else { [] }
+}
+
+/// Whether to inject into the execution holding `context`: never while disabled, otherwise with
+/// the probability the rate names. A generated rate outside 0 to 1 is taken as the nearer bound.
+export fn shouldInject(injection: &Injection, context: &Context.Context, randomizer: &Randomizer.Randomizer) -> Bool {
+  let enabled = match injection.enabledGenerator {
+    case Some(decide) => decide(*context)
+    case None => injection.enabled
+  }
+  if !enabled { return false }
+  let rate = match injection.rateGenerator {
+    case Some(generate) => generate(*context)
+    case None => injection.rate
+  }
+  Randomizer.chance(randomizer, rate)
+}
+
+/// The arguments chaos generators receive for one execution.
+export fn arguments(context: &Context.Context, randomizer: &Randomizer.Randomizer) -> Arguments {
+  Arguments{context: *context, randomizer: *randomizer}
+}

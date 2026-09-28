@@ -1,0 +1,44 @@
+/** @Test.Predicate.Suite — which outcomes each predicate handles */
+module PuduLangResilience.PredicateTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience as Resilience
+
+/// Whether `test` handles each of a fixed set of outcomes, in order.
+fn verdicts(test: Predicate.Predicate[Int, Str]) -> Array[Bool] {
+  let outcomes: Array[Resilience.Outcome[Int, Str]] = [
+    Ok(200), Ok(503), Err(Resilience.Raised("transient")), Err(Resilience.Raised("fatal")), Err(Resilience.TimedOut(10)),
+    Err(Resilience.BrokenCircuit(5)), Err(Resilience.IsolatedCircuit), Err(Resilience.RateLimited(None)), Err(Resilience.Cancelled("x")), Err(Resilience.Crashed("y"))
+  ]
+  let context = Context.create()
+  outcomes.map(|outcome: Resilience.Outcome[Int, Str]| Predicate.handles(&test, &Predicate.arguments(outcome, context, 0)))
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let combined = Predicate.anyOf(&[Predicate.result(503), Predicate.raised(|problem: Str| problem == "transient")])
+  let noneOf: Array[Predicate.Predicate[Int, Str]] = []
+  let checks = Test.suite("Predicate", &[
+      Test.equals("failures handles everything but values and cancellation", &verdicts(Predicate.failures()), &[false, false, true, true, true, true, true, true, false, true]),
+      Test.equals("raised handles the accepted errors", &verdicts(Predicate.raised(|problem: Str| problem == "transient")), &[false, false, true, false, false, false, false, false, false, false]),
+      Test.equals("anyRaised handles every callback error", &verdicts(Predicate.anyRaised()), &[false, false, true, true, false, false, false, false, false, false]),
+      Test.equals("results handles the accepted values", &verdicts(Predicate.results(|status: Int| status >= 500)), &[false, true, false, false, false, false, false, false, false, false]),
+      Test.equals("result handles an equal value", &verdicts(Predicate.result(200)), &[true, false, false, false, false, false, false, false, false, false]),
+      Test.equals("failure handles the accepted failures", &verdicts(Predicate.failure(|found: Resilience.Failure[Str]| Resilience.isCancellation(&found))), &[false, false, false, false, false, false, false, false, true, false]),
+      Test.equals("timeouts handles timeouts", &verdicts(Predicate.timeouts()), &[false, false, false, false, true, false, false, false, false, false]),
+      Test.equals("brokenCircuits handles open and isolated circuits", &verdicts(Predicate.brokenCircuits()), &[false, false, false, false, false, true, true, false, false, false]),
+      Test.equals("rateLimited handles rate limiting", &verdicts(Predicate.rateLimited()), &[false, false, false, false, false, false, false, true, false, false]),
+      Test.equals("anyOf handles what any part handles", &verdicts(combined), &[false, true, true, false, false, false, false, false, false, false]),
+      Test.equals("anyOf of nothing handles nothing", &verdicts(Predicate.anyOf(&noneOf)), &[false, false, false, false, false, false, false, false, false, false]),
+      Test.equals("never handles nothing", &verdicts(Predicate.never()), &[false, false, false, false, false, false, false, false, false, false]),
+      Test.equals("arguments carry the attempt", &Predicate.arguments(Ok(1), Context.create(), 4).attempt, &4)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

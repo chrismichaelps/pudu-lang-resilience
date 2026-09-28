@@ -1,0 +1,26 @@
+/** @Chaos.Weighted.Module — picks one of several values by weight */
+module PuduLangResilience.Chaos.Weighted
+
+import PuduLangResilience.Chaos as Chaos
+import PuduLangResilience.Randomizer as Randomizer
+
+/// A generator answering each value with a chance in proportion to its weight. Weights below
+/// one are never chosen; with no positive weight it answers nothing.
+export fn choose[V](choices: &Array[(Int, V)]) -> fn(Chaos.Arguments) -> Option[V] {
+  let options = *choices
+  fn(given: Chaos.Arguments) -> Option[V] {
+    var total = 0
+    for choice in options {
+      if choice[0] > 0 { total = total + choice[0] }
+    }
+    if total == 0 { return None }
+    var point = Randomizer.below(&given.randomizer, total)
+    for choice in options {
+      if choice[0] > 0 {
+        if point < choice[0] { return Some(choice[1]) }
+        point = point - choice[0]
+      }
+    }
+    None
+  }
+}

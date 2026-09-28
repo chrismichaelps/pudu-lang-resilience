@@ -1,0 +1,98 @@
+/** @Test.RateLimiter.Suite — admission, rejection, release, and cancellation */
+module PuduLangResilience.RateLimiterTest
+
+import Std.Io as Io
+import Std.Result as Result
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Limiter.Concurrency as Concurrency
+import PuduLangResilience.Limiter.FixedWindow as FixedWindow
+import PuduLangResilience.Limiter as Limiter
+import PuduLangResilience.Limiter.Partitioned as Partitioned
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.RateLimiter as RateLimiter
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+
+/// A pipeline of one rate limiter strategy.
+fn limited(options: RateLimiter.Options) -> Pipeline.Pipeline[Int, Str] {
+  match Pipeline.build([RateLimiter.strategy(options)]) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// The limiter the options make; stops the suite when they are refused.
+fn made(result: Result[Limiter.Limiter, Array[Str]]) -> Limiter.Limiter {
+  match result {
+    case Ok(limiter) => limiter
+    case Err(problems) => panic(problems.join("; "))
+  }
+}
+
+/// A callback answering 1.
+fn one() -> Strategy.Callback[Int, Str] { fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Ok(1) } }
+
+/// Runs the suite.
+fn main() -> Int {
+  let clock = Clock.manual(0)
+  let window = made(FixedWindow.create(&FixedWindow.Options{..FixedWindow.defaults(), permitLimit: 1, window: 1000, clock: Clock.ofManual(&clock)}))
+  let rejections: Sync.Cell[Array[Option[Int]]] = Sync.cell([])
+  let windowed = limited(RateLimiter.Options{..RateLimiter.using(window), onRejected: Some(fn(rejected: RateLimiter.Rejected) -> () {
+          let _kept = Sync.set(&rejections, [rejected.retryAfter])
+        }) })
+  let admitted = Pipeline.execute(&windowed, one())
+  Clock.advance(&clock, 400)
+  let rejected = Pipeline.execute(&windowed, one())
+
+  let single = limited(RateLimiter.concurrency(1, 0))
+  let nested = Pipeline.execute(&single, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      match Pipeline.execute(&single, one()) {
+        case Err(Resilience.RateLimited(_)) => Ok(-1)
+        case other => other
+      }
+    })
+  let afterRelease = Pipeline.execute(&single, one())
+  let afterFailure = Pipeline.execute(&single, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Resilience.raise("bad") })
+  let permitReturned = Pipeline.execute(&single, one())
+
+  let queued = made(Concurrency.create(&Concurrency.Options{..Concurrency.defaults(), permitLimit: 1, queueLimit: 1}))
+  let blocker = Limiter.acquire(&queued, 1, &Context.create().token)
+  let stopped = Context.create()
+  Context.cancel(&stopped, "caller left")
+  let abandoned = Pipeline.executeWith(&limited(RateLimiter.using(queued)), stopped, one())
+  Limiter.release(&blocker)
+
+  let partitions = Partitioned.create(fn(context: Context.Context) -> Partitioned.Partition {
+      Partitioned.Partition{key: match context.operationKey { case Some(key) => key case None => "" }, create: fn() -> Limiter.Limiter {
+          made(FixedWindow.create(&FixedWindow.Options{..FixedWindow.defaults(), permitLimit: 1, window: 60000}))
+        } }
+    })
+  let byTenant = limited(RateLimiter.partitioned(partitions))
+  let tenantA = Pipeline.executeWith(&byTenant, Context.keyed("a"), one())
+  let tenantAAgain = Pipeline.executeWith(&byTenant, Context.keyed("a"), one())
+  let tenantB = Pipeline.executeWith(&byTenant, Context.keyed("b"), one())
+
+  let invalid = Pipeline.build([RateLimiter.strategy(RateLimiter.concurrency(0, -1))])
+  let checks = Test.suite("RateLimiter", &[
+      Test.equals("an execution with a permit runs", &admitted, &Ok(1)),
+      Test.equals("an execution without a permit is rejected with the wait", &rejected, &Err(Resilience.RateLimited(Some(600)))),
+      Test.equals("onRejected sees the wait", &Sync.get(&rejections), &Ok([Some(600)])),
+      Test.equals("a concurrency limit rejects a second execution at once", &nested, &Ok(-1)),
+      Test.equals("the permit returns when the execution ends", &afterRelease, &Ok(1)),
+      Test.equals("a failed execution passes its failure through", &afterFailure, &Resilience.raise("bad")),
+      Test.equals("a failed execution returns its permit", &permitReturned, &Ok(1)),
+      Test.equals("a fired token abandons the wait as a cancellation", &abandoned, &Err(Resilience.Cancelled("cancelled: caller left"))),
+      Test.equals("each partition admits its own first execution", &(tenantA, tenantB), &(Ok(1), Ok(1))),
+      Test.that("a partition over its limit rejects", match tenantAAgain { case Err(Resilience.RateLimited(Some(_))) => true case _ => false }),
+      Test.equals("the default limiter holds a thousand permits and no queue", &(RateLimiter.defaults().defaultLimiter.permitLimit, RateLimiter.defaults().defaultLimiter.queueLimit), &(1000, 0)),
+      Test.equals("invalid default limiter options are refused", &Result.err(invalid), &Some(Pipeline.Invalid{problems: ["RateLimiter: permitLimit must be at least 1", "RateLimiter: queueLimit must not be negative"]}))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

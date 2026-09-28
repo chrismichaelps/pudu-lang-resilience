@@ -1,0 +1,38 @@
+/** @Utils.Shared.Module — mutable state shared between threads */
+module PuduLangResilience.Utils.Shared
+
+import Std.Sync as Sync
+
+/** @Utils.Shared.Shared — a value changed only under its lock */
+export type Shared[S] = { lock: Sync.Mutex, held: Sync.Cell[S] }
+
+/// A shared value starting at `initial`.
+export fn shared[S](initial: S) -> Shared[S] { Shared{lock: Sync.mutex(), held: Sync.cell(initial)} }
+
+/// The value as it stands.
+export fn current[S](source: &Shared[S]) -> S {
+  match Sync.get(&source.held) {
+    case Ok(value) => value
+    case Err(problem) => panic("shared state could not be read: " + show(problem))
+  }
+}
+
+/// Replaces the value with the first half of what `step` answers for it, and answers the second
+/// half. No other change to the same value runs between the read and the write.
+export fn change[S, R](target: &Shared[S], step: fn(S) -> (S, R)) -> R {
+  let held = target.held
+  let outcome = Sync.withLock(&target.lock, fn() -> R {
+      let next = step(current(target))
+      let _stored = Sync.set(&held, next[0])
+      next[1]
+    })
+  match outcome {
+    case Ok(answer) => answer
+    case Err(problem) => panic("shared state could not be locked: " + show(problem))
+  }
+}
+
+/// Replaces the value with what `step` answers for it.
+export fn update[S](target: &Shared[S], step: fn(S) -> S) -> () {
+  change(target, fn(value: S) -> (S, ()) { (step(value), ()) })
+}

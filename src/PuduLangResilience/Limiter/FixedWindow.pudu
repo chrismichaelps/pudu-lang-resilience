@@ -1,0 +1,40 @@
+/** @Limiter.FixedWindow.Module — at most N permits per fixed window */
+module PuduLangResilience.Limiter.FixedWindow
+
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Domain.Algorithms as Algorithms
+import PuduLangResilience.Limiter.Engine as Engine
+import PuduLangResilience.Limiter as Limiter
+
+/** @Limiter.FixedWindow.Options — permits per window and the queue behind them */
+export type Options = {
+  permitLimit: Int,
+  window: Int,
+  autoReplenishment: Bool,
+  queueLimit: Int,
+  queueOrder: Limiter.QueueOrder,
+  clock: Clock.Clock
+}
+
+/// A hundred permits a second, moving by itself, with no queue.
+export fn defaults() -> Options {
+  Options{permitLimit: 100, window: 1000, autoReplenishment: true, queueLimit: 0, queueOrder: Limiter.OldestFirst, clock: Clock.system()}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate(options: &Options) -> Array[Str] {
+  var problems: Array[Str] = []
+  if options.permitLimit < 1 { problems = problems.push("permitLimit must be at least 1") }
+  if options.window < 1 { problems = problems.push("window must be at least 1 ms") }
+  if options.queueLimit < 0 { problems = problems.push("queueLimit must not be negative") }
+  problems
+}
+
+/// A fixed window limiter whose first window starts now, or every reason it cannot be made.
+export fn create(options: &Options) -> Result[Limiter.Limiter, Array[Str]] {
+  let problems = validate(options)
+  if !problems.isEmpty() { return Err(problems) }
+  let queueing = Engine.Queueing{permitLimit: options.permitLimit, queueLimit: options.queueLimit, order: options.queueOrder}
+  let start = Algorithms.Window{used: 0, start: Clock.now(&options.clock)}
+  Ok(Engine.limiter(start, Algorithms.fixedWindow(options.permitLimit, options.window, options.autoReplenishment), &queueing, options.clock))
+}

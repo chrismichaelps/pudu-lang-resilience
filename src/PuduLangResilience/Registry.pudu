@@ -1,0 +1,113 @@
+/** @Resilience.Registry.Module — named pipelines built once and shared */
+module PuduLangResilience.Registry
+
+import Std.Map as Map
+import PuduLangResilience.Constants.Messages as Messages
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Utils.Shared as Shared
+import PuduLangResilience.Utils.Template as Template
+
+/** @Resilience.Registry.BuilderContext — the key a pipeline is being built for */
+export type BuilderContext = { key: Str, builderName: Str, instanceName: Option[Str] }
+
+/** @Resilience.Registry.Builder — the strategies of the pipeline for one key */
+export type Builder[T, E] = fn(BuilderContext) -> Array[Strategy.Strategy[T, E]]
+
+/** @Resilience.Registry.Options — shared pipeline settings and how keys become names */
+export type Options = {
+  pipeline: Pipeline.Options,
+  builderName: fn(Str) -> Str,
+  instanceName: fn(Str) -> Option[Str]
+}
+
+/** @Resilience.Registry.RegistryError — why a pipeline could not be answered */
+export type RegistryError = NotFound(Str) | Invalid(Str, Pipeline.Invalid)
+
+/** @Resilience.Registry.Registry — builders and the pipelines built from them */
+export type Registry[T, E] = {
+  options: Options,
+  entries: Shared.Shared[Map[Str, Entry[T, E]]]
+}
+
+/** @Resilience.Registry.Entry — one key's builder and its current pipeline */
+type Entry[T, E] = { builder: Builder[T, E], pipeline: Option[Pipeline.Pipeline[T, E]] }
+
+/// The default pipeline settings, each key as its builder name, and no instance name.
+export fn defaults() -> Options {
+  Options{pipeline: Pipeline.defaults(), builderName: fn(key: Str) -> Str { key }, instanceName: fn(_key: Str) -> Option[Str] { None }}
+}
+
+/// An empty registry with the default options.
+export fn create[T, E]() -> Registry[T, E] { createWith(defaults()) }
+
+/// An empty registry with the given options.
+export fn createWith[T, E](options: Options) -> Registry[T, E] { Registry{options: options, entries: Shared.shared(Map.empty())} }
+
+/// Registers the builder for a key; `false`, changing nothing, when the key already has one.
+export fn tryAddBuilder[T, E](registry: &Registry[T, E], key: Str, builder: Builder[T, E]) -> Bool {
+  Shared.change(&registry.entries, fn(held: Map[Str, Entry[T, E]]) -> (Map[Str, Entry[T, E]], Bool) {
+      if Map.containsKey(&held, key) { (held, false) } else { (Map.insert(&held, key, Entry{builder: builder, pipeline: None}), true) }
+    })
+}
+
+/// The pipeline for a key, built from its builder on first use and shared afterwards.
+export fn get[T, E](registry: &Registry[T, E], key: Str) -> Result[Pipeline.Pipeline[T, E], RegistryError] {
+  let options = registry.options
+  Shared.change(&registry.entries, fn(held: Map[Str, Entry[T, E]]) -> (Map[Str, Entry[T, E]], Result[Pipeline.Pipeline[T, E], RegistryError]) {
+      match Map.get(&held, key) {
+        case None => (held, Err(NotFound(key)))
+        case Some(entry) => resolve(&options, held, key, entry, false)
+      }
+    })
+}
+
+/// The pipeline for a key, or `None` when the key has no builder or its pipeline is invalid.
+export fn tryGet[T, E](registry: &Registry[T, E], key: Str) -> Option[Pipeline.Pipeline[T, E]] {
+  match get(registry, key) {
+    case Ok(pipeline) => Some(pipeline)
+    case Err(_) => None
+  }
+}
+
+/// The pipeline for a key, registering `builder` first when the key has none.
+export fn getOrAdd[T, E](registry: &Registry[T, E], key: Str, builder: Builder[T, E]) -> Result[Pipeline.Pipeline[T, E], RegistryError] {
+  let _added = tryAddBuilder(registry, key, builder)
+  get(registry, key)
+}
+
+/// A new pipeline for a key, built again from its builder; later `get` calls answer it. State
+/// such as an open circuit starts afresh in the new pipeline.
+export fn reload[T, E](registry: &Registry[T, E], key: Str) -> Result[Pipeline.Pipeline[T, E], RegistryError] {
+  let options = registry.options
+  Shared.change(&registry.entries, fn(held: Map[Str, Entry[T, E]]) -> (Map[Str, Entry[T, E]], Result[Pipeline.Pipeline[T, E], RegistryError]) {
+      match Map.get(&held, key) {
+        case None => (held, Err(NotFound(key)))
+        case Some(entry) => resolve(&options, held, key, entry, true)
+      }
+    })
+}
+
+/// Every key with a builder, in order.
+export fn keys[T, E](registry: &Registry[T, E]) -> Array[Str] { Map.keys(&Shared.current(&registry.entries)) }
+
+/// One sentence saying why a pipeline could not be answered.
+export fn explain(problem: &RegistryError) -> Str {
+  match problem {
+    case NotFound(key) => Template.fill(Messages.REGISTRY_NOT_FOUND, &[key])
+    case Invalid(key, invalid) => Template.fill(Messages.REGISTRY_INVALID, &[key, invalid.problems.join(Messages.PROBLEM_SEPARATOR)])
+  }
+}
+
+/// The entry's pipeline, built when it has none or when `rebuild`, and the entries holding it.
+fn resolve[T, E](options: &Options, held: Map[Str, Entry[T, E]], key: Str, entry: Entry[T, E], rebuild: Bool) -> (Map[Str, Entry[T, E]], Result[Pipeline.Pipeline[T, E], RegistryError]) {
+  if !rebuild {
+    if let Some(existing) = entry.pipeline { return (held, Ok(existing)) }
+  }
+  let context = BuilderContext{key: key, builderName: (options.builderName)(key), instanceName: (options.instanceName)(key)}
+  let settings = Pipeline.Options{..options.pipeline, name: Some(context.builderName), instance: context.instanceName}
+  match Pipeline.buildWith(&settings, (entry.builder)(context)) {
+    case Ok(built) => (Map.insert(&held, key, Entry{..entry, pipeline: Some(built)}), Ok(built))
+    case Err(invalid) => (held, Err(Invalid(key, invalid)))
+  }
+}

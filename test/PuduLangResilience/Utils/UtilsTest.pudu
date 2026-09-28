@@ -1,0 +1,44 @@
+/** @Test.Utils.Suite — saturating arithmetic, float conversion, and shared state */
+module PuduLangResilience.Utils.UtilsTest
+
+import Std.Concurrent as Concurrent
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience.Utils.Numeric as Numeric
+import PuduLangResilience.Utils.Shared as Shared
+
+/// Runs the suite.
+fn main() -> Int {
+  let total = Shared.shared(0)
+  var actions: Array[fn() -> ()] = []
+  for _worker in [1, 2, 3, 4, 5, 6, 7, 8] {
+    actions = actions.push(fn() -> () {
+        for _step in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+          Shared.update(&total, fn(held: Int) -> Int { held + 1 })
+        }
+      })
+  }
+  let _ran = Concurrent.parallel(&actions)
+  let swapped = Shared.change(&total, fn(held: Int) -> (Int, Int) { (0, held) })
+  let checks = Test.suite("Utils", &[
+      Test.equals("addition below the limit is exact", &Numeric.add(2, 3), &5),
+      Test.equals("addition saturates", &Numeric.add(Numeric.LARGEST, 1), &Numeric.LARGEST),
+      Test.equals("addition at the limit is exact", &Numeric.add(Numeric.LARGEST - 1, 1), &Numeric.LARGEST),
+      Test.equals("multiplication below the limit is exact", &Numeric.multiply(6, 7), &42),
+      Test.equals("multiplication by zero is zero", &(Numeric.multiply(0, 9), Numeric.multiply(9, 0)), &(0, 0)),
+      Test.equals("multiplication saturates", &Numeric.multiply(Numeric.LARGEST / 2 + 1, 2), &Numeric.LARGEST),
+      Test.equals("a whole float converts exactly", &Numeric.toInt(Numeric.toFloat(86400000)), &86400000),
+      Test.equals("a fraction is rounded down", &Numeric.toInt(2.99), &2),
+      Test.equals("negative floats clamp to zero", &Numeric.toInt(-4.0), &0),
+      Test.equals("huge and infinite floats saturate", &(Numeric.toInt(1.0e30), Numeric.toInt(1.0 / 0.0)), &(Numeric.LARGEST, Numeric.LARGEST)),
+      Test.equals("a large float in range converts", &Numeric.toInt(1.5e10), &15000000000),
+      Test.equals("parts of a ratio round down", &(Numeric.partsOf(0.001d, 1000000000), Numeric.partsOf(0.3333d, 10)), &(1000000, 3)),
+      Test.equals("concurrent updates lose nothing", &swapped, &80),
+      Test.equals("a change stores its new value", &Shared.current(&total), &0)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

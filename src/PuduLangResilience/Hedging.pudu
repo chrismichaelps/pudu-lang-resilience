@@ -1,0 +1,168 @@
+/** @Resilience.Hedging.Strategy — races extra attempts against a slow one */
+module PuduLangResilience.Hedging
+
+import Std.Channel as Channel
+import Std.Concurrent.Cancel as Cancel
+import Std.Option as Option
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Hedging.Attempts as Attempts
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Resilience.Hedging.Action — what a hedged attempt is generated from */
+export type Action[T, E] = {
+  primaryContext: Context.Context,
+  actionContext: Context.Context,
+  attempt: Int,
+  callback: Strategy.Callback[T, E]
+}
+
+/** @Resilience.Hedging.DelayArguments — the attempt a hedging delay is chosen for */
+export type DelayArguments = { context: Context.Context, attempt: Int }
+
+/** @Resilience.Hedging.Hedged — the hedged attempt about to start */
+export type Hedged = { primaryContext: Context.Context, actionContext: Context.Context, attempt: Int }
+
+/** @Resilience.Hedging.Options — how many attempts to race and when to start them */
+export type Options[T, E] = {
+  name: Option[Str],
+  shouldHandle: Predicate.Predicate[T, E],
+  maxHedgedAttempts: Int,
+  delay: Int,
+  actionGenerator: Option[fn(Action[T, E]) -> Option[Strategy.Callback[T, E]]],
+  delayGenerator: Option[fn(DelayArguments) -> Int],
+  onHedging: Option[fn(Hedged) -> ()]
+}
+
+/// A delay that starts the next hedged attempt only once an earlier attempt's outcome is handled.
+export const WAIT_FOR_OUTCOME: Int = -1
+
+/// The most hedged attempts an option may name.
+const MOST_HEDGED: Int = 10
+
+/// The longest delay an option may name: one day, in milliseconds.
+const LONGEST_DELAY: Int = 86400000
+
+/// One hedged attempt, started after two seconds, for every failure except a cancellation.
+export fn defaults[T, E]() -> Options[T, E] {
+  Options{name: None, shouldHandle: Predicate.failures(), maxHedgedAttempts: 1, delay: 2000, actionGenerator: None, delayGenerator: None, onHedging: None}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate[T, E](options: &Options[T, E]) -> Array[Str] {
+  var problems: Array[Str] = []
+  if options.maxHedgedAttempts < 1 || options.maxHedgedAttempts > MOST_HEDGED { problems = problems.push("maxHedgedAttempts must be from 1 to 10") }
+  if options.delay < WAIT_FOR_OUTCOME || options.delay > LONGEST_DELAY { problems = problems.push("delay must be from -1 to 86400000 ms") }
+  problems
+}
+
+/// A hedging strategy following the options.
+export fn strategy[T, E](options: Options[T, E]) -> Strategy.Strategy[T, E] {
+  let pace = if options.delay == WAIT_FOR_OUTCOME { "after each handled outcome" } else { "every " + show(options.delay) + " ms" }
+  Strategy.Strategy {
+    name: options.name,
+    kind: "Hedging",
+    summary: "up to " + show(options.maxHedgedAttempts) + " hedged attempts " + pace,
+    problems: validate(&options),
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      execute(&options, &runtime, context, callback)
+    }
+  }
+}
+
+/// Runs the callback and, each time the delay passes or an attempt's outcome is handled, one more
+/// attempt, until an attempt answers an outcome that is not handled or every attempt has
+/// answered. The first unhandled outcome wins; without one, the last outcome to arrive is
+/// answered. The other attempts are cancelled and waited for, and the winner's properties are
+/// copied into the caller's context.
+fn execute[T, E](options: &Options[T, E], runtime: &Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+  let total = options.maxHedgedAttempts + 1
+  let finished: Channel.Channel[Int] = Channel.channel(total)
+  var attempts: Array[Attempts.Attempt[T, E]] = Option.toArray(start(options, runtime, &context, callback, 0, &finished))
+  var exhausted = false
+  var answered = 0
+  var delayFor = attempts.length()
+  var delay = waitFor(options, context, delayFor)
+  loop {
+    if !exhausted && delayFor != attempts.length() {
+      delayFor = attempts.length()
+      delay = waitFor(options, context, delayFor)
+    }
+    let wait = if exhausted { Attempts.FOREVER } else { delay }
+    match Attempts.next(&finished, &runtime.clock, wait) {
+      case None => {
+        let grown = launchNext(options, runtime, &context, callback, &attempts, total, &finished)
+        attempts = grown[0]
+        exhausted = grown[1]
+      }
+      case Some(index) => {
+        answered = answered + 1
+        let attempt = attempts[index]
+        let outcome = Attempts.outcomeOf(&attempt)
+        let handled = (options.shouldHandle)(Predicate.arguments(outcome, attempt.context, index))
+        let severity = if handled { Telemetry.Warning } else { Telemetry.Information }
+        let duration = Clock.now(&runtime.clock) - attempt.started
+        Telemetry.report(&runtime.telemetry, &context, Events.EXECUTION_ATTEMPT, severity, Some(Resilience.summarize(&outcome)), Telemetry.Attempted(index, duration, handled))
+        if handled && !exhausted {
+          let grown = launchNext(options, runtime, &context, callback, &attempts, total, &finished)
+          attempts = grown[0]
+          exhausted = grown[1]
+        }
+        if !handled || (exhausted && answered == attempts.length()) {
+          Attempts.settle(&attempts, "another hedged attempt was accepted")
+          Context.adopt(&context, &attempt.context)
+          return outcome
+        }
+      }
+    }
+  }
+}
+
+/// How long to wait for an attempt to finish before starting the attempt numbered `launched`.
+fn waitFor[T, E](options: &Options[T, E], context: Context.Context, launched: Int) -> Int {
+  let delay = nextDelay(options, context, launched)
+  if delay == WAIT_FOR_OUTCOME { Attempts.FOREVER } else if delay < 0 { 0 } else { delay }
+}
+
+/// The attempts with the next one started, and whether no further attempt can start.
+fn launchNext[T, E](options: &Options[T, E], runtime: &Strategy.Runtime, context: &Context.Context, callback: Strategy.Callback[T, E], attempts: &Array[Attempts.Attempt[T, E]], total: Int, finished: &Channel.Channel[Int]) -> (Array[Attempts.Attempt[T, E]], Bool) {
+  if attempts.length() >= total { return (*attempts, true) }
+  match start(options, runtime, context, callback, attempts.length(), finished) {
+    case Some(attempt) => {
+      let grown = attempts.push(attempt)
+      (grown, grown.length() >= total)
+    }
+    case None => (*attempts, true)
+  }
+}
+
+/// The delay before the attempt numbered `attempt`, asked once per attempt.
+fn nextDelay[T, E](options: &Options[T, E], context: Context.Context, attempt: Int) -> Int {
+  match options.delayGenerator {
+    case Some(generate) => generate(DelayArguments{context: context, attempt: attempt})
+    case None => options.delay
+  }
+}
+
+/// Starts the attempt numbered `index` with its own copy of the context, or `None` when the
+/// action generator declines to make one.
+fn start[T, E](options: &Options[T, E], runtime: &Strategy.Runtime, primary: &Context.Context, callback: Strategy.Callback[T, E], index: Int, finished: &Channel.Channel[Int]) -> Option[Attempts.Attempt[T, E]] {
+  let forked = Context.fork(primary, Cancel.child(&primary.token))
+  let action = if index == 0 { Some(callback) } else {
+    match options.actionGenerator {
+      case Some(generate) => generate(Action{primaryContext: *primary, actionContext: forked, attempt: index, callback: callback})
+      case None => Some(callback)
+    }
+  }
+  let chosen = action ?
+  if index > 0 {
+    Telemetry.report(&runtime.telemetry, primary, Events.ON_HEDGING, Telemetry.Warning, None, Telemetry.Hedged(index))
+    if let Some(notify) = options.onHedging { notify(Hedged{primaryContext: *primary, actionContext: forked, attempt: index}) }
+  }
+  Some(Attempts.launch(index, forked, chosen, finished, Clock.now(&runtime.clock)))
+}

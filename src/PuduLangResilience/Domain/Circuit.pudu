@@ -1,0 +1,92 @@
+/** @Domain.Circuit.StateMachine — circuit transitions over health counts */
+module PuduLangResilience.Domain.Circuit
+
+import Std.Decimal as Decimal
+import Std.Math as Math
+import PuduLangResilience.Domain.Health as Health
+import PuduLangResilience.Utils.Numeric as Numeric
+
+/** @Domain.Circuit.Phase — which executions the circuit admits */
+export type Phase = Closed | Open | HalfOpen | Isolated
+
+/** @Domain.Circuit.Machine — the circuit's phase, deadline, and counts */
+export type Machine = {
+  phase: Phase,
+  blockedUntil: Int,
+  halfOpenAttempts: Int,
+  health: Health.Health,
+  lastHandled: Option[Str]
+}
+
+/** @Domain.Circuit.Admission — the answer to one execution asking to run */
+export type Admission = Admitted | Probe | Blocked(Int) | Refused
+
+/** @Domain.Circuit.Thresholds — when a closed circuit opens */
+export type Thresholds = { failureRatio: Decimal, minimumThroughput: Int }
+
+/// A closed circuit counting over a sampling period of `sampling` milliseconds.
+export fn closed(sampling: Int) -> Machine {
+  Machine{phase: Closed, blockedUntil: 0, halfOpenAttempts: 0, health: Health.create(sampling), lastHandled: None}
+}
+
+/// Whether an execution may run at `now`. An open circuit past its deadline turns half-open and
+/// admits this one execution as its probe, pushing the deadline `breakDuration` further; every
+/// other execution waits for the probe's outcome.
+export fn admit(machine: &Machine, now: Int, breakDuration: Int) -> (Machine, Admission) {
+  match machine.phase {
+    case Closed => (*machine, Admitted)
+    case Isolated => (*machine, Refused)
+    case Open => {
+      if now >= machine.blockedUntil {
+        let probing = Machine{..*machine, phase: HalfOpen, halfOpenAttempts: machine.halfOpenAttempts + 1, blockedUntil: Numeric.add(now, breakDuration)}
+        (probing, Probe)
+      } else {
+        (*machine, Blocked(machine.blockedUntil - now))
+      }
+    }
+    case HalfOpen => (*machine, Blocked(retryAfter(machine, now)))
+  }
+}
+
+/// The circuit after an unhandled outcome at `now`, and whether it closed. A half-open circuit
+/// closes; the outcome is counted in every phase.
+export fn succeeded(machine: &Machine, now: Int) -> (Machine, Bool) {
+  let counted = Machine{..*machine, health: Health.record(&machine.health, now, false)}
+  if machine.phase == HalfOpen { (close(&counted), true) } else { (counted, false) }
+}
+
+/// The circuit after a handled outcome at `now`, and whether it must now open: always from
+/// half-open, and from closed once the thresholds are met. The failure is counted except while
+/// half-open.
+export fn failed(machine: &Machine, now: Int, summary: Str, thresholds: &Thresholds) -> (Machine, Bool) {
+  let noted = Machine{..*machine, lastHandled: Some(summary)}
+  match machine.phase {
+    case HalfOpen => (noted, true)
+    case Closed => {
+      let counted = Machine{..noted, health: Health.record(&noted.health, now, true)}
+      let totals = Health.info(&counted.health, now)
+      (counted, Health.shouldBreak(&totals, thresholds.failureRatio, thresholds.minimumThroughput))
+    }
+    case _ => (Machine{..noted, health: Health.record(&noted.health, now, true)}, false)
+  }
+}
+
+/// The circuit opened at `now` for `duration` milliseconds.
+export fn open(machine: &Machine, now: Int, duration: Int) -> Machine {
+  Machine{..*machine, phase: Open, blockedUntil: Numeric.add(now, Math.max(0, duration))}
+}
+
+/// The circuit held open until closed by hand.
+export fn isolate(machine: &Machine) -> Machine {
+  Machine{..*machine, phase: Isolated, blockedUntil: Numeric.LARGEST, lastHandled: Some("the circuit was isolated")}
+}
+
+/// The circuit closed, with its counts and half-open attempts cleared.
+export fn close(machine: &Machine) -> Machine {
+  Machine{..*machine, phase: Closed, blockedUntil: 0, halfOpenAttempts: 0, health: Health.reset(&machine.health), lastHandled: None}
+}
+
+/// Milliseconds until the circuit may admit a probe, never below zero.
+export fn retryAfter(machine: &Machine, now: Int) -> Int {
+  Math.max(0, machine.blockedUntil - now)
+}

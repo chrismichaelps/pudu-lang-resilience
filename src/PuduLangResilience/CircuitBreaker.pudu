@@ -1,0 +1,230 @@
+/** @Resilience.CircuitBreaker.Strategy — stops calling a failing dependency for a while */
+module PuduLangResilience.CircuitBreaker
+
+import Std.Decimal as Decimal
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Domain.Circuit as Circuit
+import PuduLangResilience.Domain.Health as Health
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+import PuduLangResilience.Utils.Numeric as Numeric
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Resilience.CircuitBreaker.CircuitState — which executions a circuit admits */
+export type CircuitState = Closed | Open | HalfOpen | Isolated
+
+/** @Resilience.CircuitBreaker.BreakArguments — the health a break duration is chosen from */
+export type BreakArguments = { failureRate: Decimal, failureCount: Int, halfOpenAttempts: Int, context: Context.Context }
+
+/** @Resilience.CircuitBreaker.Opening — why and for how long a circuit opened */
+export type Opening[T, E] = { context: Context.Context, outcome: Option[Resilience.Outcome[T, E]], breakDuration: Int, manual: Bool }
+
+/** @Resilience.CircuitBreaker.Closing — what closed a circuit */
+export type Closing[T, E] = { context: Context.Context, outcome: Option[Resilience.Outcome[T, E]], manual: Bool }
+
+/** @Resilience.CircuitBreaker.ManualControl — isolates and closes circuits by hand */
+export type ManualControl = { isolated: Shared.Shared[Bool], hooks: Shared.Shared[Array[fn(Bool) -> ()]] }
+
+/** @Resilience.CircuitBreaker.StateProvider — reads the state of one circuit */
+export type StateProvider = { reader: Shared.Shared[Option[fn() -> Circuit.Machine]] }
+
+/** @Resilience.CircuitBreaker.Options — when a circuit opens and for how long */
+export type Options[T, E] = {
+  name: Option[Str],
+  shouldHandle: Predicate.Predicate[T, E],
+  failureRatio: Decimal,
+  minimumThroughput: Int,
+  samplingDuration: Int,
+  breakDuration: Int,
+  breakDurationGenerator: Option[fn(BreakArguments) -> Int],
+  manualControl: Option[ManualControl],
+  stateProvider: Option[StateProvider],
+  onOpened: Option[fn(Opening[T, E]) -> ()],
+  onClosed: Option[fn(Closing[T, E]) -> ()],
+  onHalfOpened: Option[fn(Context.Context) -> ()]
+}
+
+/** @Resilience.CircuitBreaker.Breaker — one circuit and the runtime it reports through */
+type Breaker = { machine: Shared.Shared[Circuit.Machine], runtime: Shared.Shared[Strategy.Runtime] }
+
+/// The shortest sampling or break duration an option may name, in milliseconds.
+const SHORTEST: Int = 500
+
+/// The longest sampling or break duration an option may name: one day, in milliseconds.
+const LONGEST: Int = 86400000
+
+/// Opens at a tenth of at least 100 executions failing within 30 seconds, for 5 seconds.
+export fn defaults[T, E]() -> Options[T, E] {
+  Options {
+    name: None,
+    shouldHandle: Predicate.failures(),
+    failureRatio: 0.1d,
+    minimumThroughput: 100,
+    samplingDuration: 30000,
+    breakDuration: 5000,
+    breakDurationGenerator: None,
+    manualControl: None,
+    stateProvider: None,
+    onOpened: None,
+    onClosed: None,
+    onHalfOpened: None
+  }
+}
+
+/// Every reason the options cannot be followed, not counting an attached state provider.
+export fn validate[T, E](options: &Options[T, E]) -> Array[Str] {
+  var problems: Array[Str] = []
+  if options.failureRatio < 0d || options.failureRatio > 1d { problems = problems.push("failureRatio must be from 0 to 1") }
+  if options.minimumThroughput < 2 { problems = problems.push("minimumThroughput must be at least 2") }
+  if options.samplingDuration < SHORTEST || options.samplingDuration > LONGEST { problems = problems.push("samplingDuration must be from 500 to 86400000 ms") }
+  if options.breakDuration < SHORTEST || options.breakDuration > LONGEST { problems = problems.push("breakDuration must be from 500 to 86400000 ms") }
+  problems
+}
+
+/// A manual control holding no circuit, not isolated.
+export fn manualControl() -> ManualControl { ManualControl{isolated: Shared.shared(false), hooks: Shared.shared([])} }
+
+/// Isolates every circuit the control holds, and every circuit attached to it later, until closed.
+export fn isolate(control: &ManualControl) -> () {
+  Shared.update(&control.isolated, fn(_held: Bool) -> Bool { true })
+  for hook in Shared.current(&control.hooks) { hook(true) }
+}
+
+/// Closes every circuit the control holds.
+export fn close(control: &ManualControl) -> () {
+  Shared.update(&control.isolated, fn(_held: Bool) -> Bool { false })
+  for hook in Shared.current(&control.hooks) { hook(false) }
+}
+
+/// Whether the control last isolated its circuits.
+export fn isIsolated(control: &ManualControl) -> Bool { Shared.current(&control.isolated) }
+
+/// A state provider attached to no circuit.
+export fn stateProvider() -> StateProvider { StateProvider{reader: Shared.shared(None)} }
+
+/// The state of the provider's circuit, or `None` before it is attached.
+export fn state(provider: &StateProvider) -> Option[CircuitState] {
+  let read = Shared.current(&provider.reader) ?
+  Some(publicState(&read().phase))
+}
+
+/// The last outcome the provider's circuit handled, while the circuit is not closed.
+export fn lastHandled(provider: &StateProvider) -> Option[Str] {
+  let read = Shared.current(&provider.reader) ?
+  read().lastHandled
+}
+
+/// A circuit breaker strategy following the options. Every pipeline holding the same strategy
+/// shares its one circuit.
+export fn strategy[T, E](options: Options[T, E]) -> Strategy.Strategy[T, E] {
+  let breaker = Breaker{machine: Shared.shared(Circuit.closed(options.samplingDuration)), runtime: Shared.shared(Strategy.standalone())}
+  var problems = validate(&options)
+  if let Some(provider) = options.stateProvider {
+    let machine = breaker.machine
+    let attached = Shared.change(&provider.reader, fn(held: Option[fn() -> Circuit.Machine]) -> (Option[fn() -> Circuit.Machine], Bool) {
+        match held {
+          case Some(_) => (held, false)
+          case None => (Some(fn() -> Circuit.Machine { Shared.current(&machine) }), true)
+        }
+      })
+    if !attached { problems = problems.push("the state provider is already attached to another circuit") }
+  }
+  if let Some(control) = options.manualControl {
+    let hook = fn(isolating: Bool) -> () { manual(&options, &breaker, isolating) }
+    Shared.update(&control.hooks, fn(hooks: Array[fn(Bool) -> ()]) -> Array[fn(Bool) -> ()] { hooks.push(hook) })
+    if isIsolated(&control) { Shared.update(&breaker.machine, fn(held: Circuit.Machine) -> Circuit.Machine { Circuit.isolate(&held) }) }
+  }
+  Strategy.Strategy {
+    name: options.name,
+    kind: "CircuitBreaker",
+    summary: "opens at " + Decimal.toText(options.failureRatio) + " of " + show(options.minimumThroughput) + " executions in " + show(options.samplingDuration) + " ms for " + show(options.breakDuration) + " ms",
+    problems: problems,
+    attach: fn(runtime: Strategy.Runtime) -> () { Shared.update(&breaker.runtime, fn(_held: Strategy.Runtime) -> Strategy.Runtime { runtime }) },
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      execute(&options, &breaker, &runtime, context, callback)
+    }
+  }
+}
+
+/// The public name of a circuit phase.
+fn publicState(phase: &Circuit.Phase) -> CircuitState {
+  match phase {
+    case Circuit.Closed => Closed
+    case Circuit.Open => Open
+    case Circuit.HalfOpen => HalfOpen
+    case Circuit.Isolated => Isolated
+  }
+}
+
+/// Runs the callback when the circuit admits it and records whether its outcome was handled;
+/// answers `BrokenCircuit` or `IsolatedCircuit` without running it otherwise.
+fn execute[T, E](options: &Options[T, E], breaker: &Breaker, runtime: &Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+  let admitted = Clock.now(&runtime.clock)
+  let breakDuration = options.breakDuration
+  let admission = Shared.change(&breaker.machine, fn(held: Circuit.Machine) -> (Circuit.Machine, Circuit.Admission) { Circuit.admit(&held, admitted, breakDuration) })
+  match admission {
+    case Circuit.Refused => { return Err(Resilience.IsolatedCircuit) }
+    case Circuit.Blocked(millis) => { return Err(Resilience.BrokenCircuit(millis)) }
+    case Circuit.Probe => {
+      Telemetry.report(&runtime.telemetry, &context, Events.ON_CIRCUIT_HALF_OPENED, Telemetry.Warning, None, Telemetry.HalfOpened)
+      if let Some(notify) = options.onHalfOpened { notify(context) }
+    }
+    case Circuit.Admitted => ()
+  }
+  let outcome = callback(context)
+  let finished = Clock.now(&runtime.clock)
+  if !(options.shouldHandle)(Predicate.arguments(outcome, context, 0)) {
+    let closedNow = Shared.change(&breaker.machine, fn(held: Circuit.Machine) -> (Circuit.Machine, Bool) { Circuit.succeeded(&held, finished) })
+    if closedNow { reportClosed(options, runtime, context, Some(outcome), false) }
+    return outcome
+  }
+  let thresholds = Circuit.Thresholds{failureRatio: options.failureRatio, minimumThroughput: options.minimumThroughput}
+  let summary = Resilience.summarize(&outcome)
+  let generator = options.breakDurationGenerator
+  let opened = Shared.change(&breaker.machine, fn(held: Circuit.Machine) -> (Circuit.Machine, Option[Int]) {
+      let judged = Circuit.failed(&held, finished, summary, &thresholds)
+      if !judged[1] { return (judged[0], None) }
+      let duration = match generator {
+        case Some(generate) => {
+          let totals = Health.info(&judged[0].health, finished)
+          generate(BreakArguments{failureRate: Health.failureRate(&totals), failureCount: totals.failures, halfOpenAttempts: judged[0].halfOpenAttempts, context: context})
+        }
+        case None => breakDuration
+      }
+      (Circuit.open(&judged[0], finished, duration), Some(duration))
+    })
+  if let Some(duration) = opened { reportOpened(options, runtime, context, Some(outcome), duration, false) }
+  outcome
+}
+
+/// Isolates or closes the circuit by hand, reporting the transition through the runtime the
+/// strategy was last attached to.
+fn manual[T, E](options: &Options[T, E], breaker: &Breaker, isolating: Bool) -> () {
+  let runtime = Shared.current(&breaker.runtime)
+  let context = Context.create()
+  if isolating {
+    Shared.update(&breaker.machine, fn(held: Circuit.Machine) -> Circuit.Machine { Circuit.isolate(&held) })
+    reportOpened(options, &runtime, context, None, Numeric.LARGEST, true)
+  } else {
+    let changed = Shared.change(&breaker.machine, fn(held: Circuit.Machine) -> (Circuit.Machine, Bool) { (Circuit.close(&held), held.phase != Circuit.Closed) })
+    if changed { reportClosed(options, &runtime, context, None, true) }
+  }
+}
+
+/// Reports an opened circuit and calls `onOpened`.
+fn reportOpened[T, E](options: &Options[T, E], runtime: &Strategy.Runtime, context: Context.Context, outcome: Option[Resilience.Outcome[T, E]], duration: Int, byHand: Bool) -> () {
+  let summary = match outcome { case Some(found) => Some(Resilience.summarize(&found)) case None => None }
+  Telemetry.report(&runtime.telemetry, &context, Events.ON_CIRCUIT_OPENED, Telemetry.Error, summary, Telemetry.Opened(duration, byHand))
+  if let Some(notify) = options.onOpened { notify(Opening{context: context, outcome: outcome, breakDuration: duration, manual: byHand}) }
+}
+
+/// Reports a closed circuit and calls `onClosed`.
+fn reportClosed[T, E](options: &Options[T, E], runtime: &Strategy.Runtime, context: Context.Context, outcome: Option[Resilience.Outcome[T, E]], byHand: Bool) -> () {
+  let summary = match outcome { case Some(found) => Some(Resilience.summarize(&found)) case None => None }
+  Telemetry.report(&runtime.telemetry, &context, Events.ON_CIRCUIT_CLOSED, Telemetry.Information, summary, Telemetry.Closed(byHand))
+  if let Some(notify) = options.onClosed { notify(Closing{context: context, outcome: outcome, manual: byHand}) }
+}

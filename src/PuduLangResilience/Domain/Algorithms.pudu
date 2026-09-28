@@ -1,0 +1,122 @@
+/** @Domain.Algorithms.Module — how each limiter kind counts permits */
+module PuduLangResilience.Domain.Algorithms
+
+import Std.Math as Math
+import PuduLangResilience.Domain.Permits as Permits
+import PuduLangResilience.Utils.Numeric as Numeric
+
+/** @Domain.Algorithms.Bucket — tokens left and when they were last topped up */
+export type Bucket = { tokens: Int, stamp: Int }
+
+/** @Domain.Algorithms.Window — permits used since the window began */
+export type Window = { used: Int, start: Int }
+
+/** @Domain.Algorithms.Segments — permits used per segment, oldest first */
+export type Segments = { counts: Array[Int], start: Int }
+
+/// Permits held while an execution runs and handed back when it ends.
+export fn concurrency(limit: Int) -> Permits.Algorithm[Int] {
+  Permits.Algorithm {
+    refresh: fn(held: Int, _now: Int) -> Int { held },
+    available: fn(held: Int) -> Int { held },
+    take: fn(held: Int, permits: Int) -> Int { held - permits },
+    giveBack: fn(held: Int, permits: Int) -> Int { Math.min(held + permits, limit) },
+    retryAfter: fn(_held: Int, _now: Int, _permits: Int) -> Option[Int] { None },
+    replenish: fn(held: Int) -> (Int, Bool) { (held, false) }
+  }
+}
+
+/// A bucket of at most `limit` tokens gaining `perPeriod` tokens every `period` milliseconds,
+/// by itself when `automatic` and otherwise only when replenished by hand.
+export fn tokenBucket(limit: Int, perPeriod: Int, period: Int, automatic: Bool) -> Permits.Algorithm[Bucket] {
+  Permits.Algorithm {
+    refresh: fn(held: Bucket, now: Int) -> Bucket {
+      if !automatic { return held }
+      let periods = Math.max(0, (now - held.stamp) / period)
+      Bucket{tokens: Math.min(Numeric.add(held.tokens, Numeric.multiply(periods, perPeriod)), limit), stamp: held.stamp + periods * period}
+    },
+    available: fn(held: Bucket) -> Int { held.tokens },
+    take: fn(held: Bucket, permits: Int) -> Bucket { Bucket{..held, tokens: held.tokens - permits} },
+    giveBack: fn(held: Bucket, _permits: Int) -> Bucket { held },
+    retryAfter: fn(held: Bucket, now: Int, permits: Int) -> Option[Int] {
+      if !automatic { return None }
+      let missing = permits - held.tokens
+      let periods = (missing + perPeriod - 1) / perPeriod
+      Some(Math.max(0, Numeric.multiply(periods, period) - (now - held.stamp)))
+    },
+    replenish: fn(held: Bucket) -> (Bucket, Bool) {
+      if automatic { (held, false) } else { (Bucket{..held, tokens: Math.min(Numeric.add(held.tokens, perPeriod), limit)}, true) }
+    }
+  }
+}
+
+/// At most `limit` permits in each window of `window` milliseconds, the window moving by itself
+/// when `automatic` and otherwise only when replenished by hand.
+export fn fixedWindow(limit: Int, window: Int, automatic: Bool) -> Permits.Algorithm[Window] {
+  Permits.Algorithm {
+    refresh: fn(held: Window, now: Int) -> Window {
+      if !automatic { return held }
+      let passed = (now - held.start) / window
+      if passed <= 0 { held } else { Window{used: 0, start: held.start + passed * window} }
+    },
+    available: fn(held: Window) -> Int { limit - held.used },
+    take: fn(held: Window, permits: Int) -> Window { Window{..held, used: held.used + permits} },
+    giveBack: fn(held: Window, _permits: Int) -> Window { held },
+    retryAfter: fn(held: Window, now: Int, _permits: Int) -> Option[Int] {
+      if automatic { Some(Math.max(0, held.start + window - now)) } else { None }
+    },
+    replenish: fn(held: Window) -> (Window, Bool) {
+      if automatic { (held, false) } else { (Window{..held, used: 0}, true) }
+    }
+  }
+}
+
+/// At most `limit` permits in any `window` milliseconds, counted in `segments` equal segments;
+/// the segments move by themselves when `automatic` and otherwise only when replenished by hand.
+export fn slidingWindow(limit: Int, window: Int, segments: Int, automatic: Bool) -> Permits.Algorithm[Segments] {
+  let length = window / segments
+  Permits.Algorithm {
+    refresh: fn(held: Segments, now: Int) -> Segments {
+      if !automatic { return held }
+      let passed = Math.max(0, (now - held.start) / length)
+      Segments{counts: shifted(&held.counts, passed), start: held.start + passed * length}
+    },
+    available: fn(held: Segments) -> Int { limit - total(&held.counts) },
+    take: fn(held: Segments, permits: Int) -> Segments {
+      let last = held.counts.length() - 1
+      Segments{..held, counts: held.counts.slice(0, last).push(held.counts[last] + permits)}
+    },
+    giveBack: fn(held: Segments, _permits: Int) -> Segments { held },
+    retryAfter: fn(held: Segments, now: Int, permits: Int) -> Option[Int] {
+      if !automatic { return None }
+      let missing = permits - (limit - total(&held.counts))
+      var freed = 0
+      var index = 0
+      for count in held.counts {
+        freed = freed + count
+        if freed >= missing { return Some(Math.max(0, held.start + (index + 1) * length - now)) }
+        index = index + 1
+      }
+      None
+    },
+    replenish: fn(held: Segments) -> (Segments, Bool) {
+      if automatic { (held, false) } else { (Segments{..held, counts: shifted(&held.counts, 1)}, true) }
+    }
+  }
+}
+
+/// Segment counts after `steps` segments have passed: the oldest drop out and empty ones join.
+export fn shifted(counts: &Array[Int], steps: Int) -> Array[Int] {
+  let size = counts.length()
+  let dropped = Math.min(steps, size)
+  var next = counts.slice(dropped, size)
+  while next.length() < size { next = next.push(0) }
+  next
+}
+
+/// The sum of the counts.
+fn total(counts: &Array[Int]) -> Int {
+  var sum = 0
+  for count in counts { sum = Numeric.add(sum, count) }
+  sum
+}

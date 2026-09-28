@@ -1,0 +1,42 @@
+/** @Telemetry.Log.Module — events written as single text lines */
+module PuduLangResilience.Telemetry.Log
+
+import PuduLangResilience.Telemetry as Telemetry
+
+/// A listener writing every event of at least the `least` severity as one line.
+export fn listener(least: Telemetry.Severity, write: fn(Str) -> ()) -> Telemetry.Listener {
+  fn(event: Telemetry.Event) -> () {
+    if Telemetry.rank(&event.severity) >= Telemetry.rank(&least) { write(format(&event)) }
+  }
+}
+
+/// One line naming an event's severity, name, source, operation, detail, and outcome.
+export fn format(event: &Telemetry.Event) -> Str {
+  let operation = match event.operationKey { case Some(key) => " operation=" + key case None => "" }
+  let outcome = match event.outcome { case Some(text) => " outcome=" + text case None => "" }
+  let detail = describe(&event.detail)
+  let measured = if detail.isEmpty() { "" } else { " " + detail }
+  "[" + Telemetry.severityName(&event.severity) + "] " + event.name + " source=" + Telemetry.sourceName(&event.source) + operation + measured + outcome
+}
+
+/// The measurements an event carries, as `name=value` pairs.
+fn describe(detail: &Telemetry.Detail) -> Str {
+  match detail {
+    case Telemetry.Executing => ""
+    case Telemetry.Executed(duration) => "duration=" + show(duration)
+    case Telemetry.Attempted(number, duration, handled) => "attempt=" + show(number) + " duration=" + show(duration) + " handled=" + show(handled)
+    case Telemetry.Retrying(number, delay) => "attempt=" + show(number) + " delay=" + show(delay)
+    case Telemetry.Opened(duration, manual) => "break=" + show(duration) + " manual=" + show(manual)
+    case Telemetry.Closed(manual) => "manual=" + show(manual)
+    case Telemetry.HalfOpened => ""
+    case Telemetry.FellBack => ""
+    case Telemetry.Hedged(number) => "attempt=" + show(number)
+    case Telemetry.TimeoutElapsed(timeout) => "timeout=" + show(timeout)
+    case Telemetry.Rejected(Some(after)) => "retryAfter=" + show(after)
+    case Telemetry.Rejected(None) => ""
+    case Telemetry.FaultInjected => ""
+    case Telemetry.OutcomeInjected => ""
+    case Telemetry.LatencyInjected(latency) => "latency=" + show(latency)
+    case Telemetry.BehaviorInjected => ""
+  }
+}

@@ -1,0 +1,62 @@
+/** @Resilience.Randomizer.Seam — uniform draws for jitter and injection */
+module PuduLangResilience.Randomizer
+
+import Std.Decimal as Decimal
+import Std.Random as Random
+import PuduLangResilience.Utils.Numeric as Numeric
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Resilience.Randomizer.Randomizer — answers a whole number below a bound */
+export type Randomizer = { draw: fn(Int) -> Int }
+
+/// The number of parts one unit is divided into by `fraction`.
+export const SCALE: Int = 1000000000
+
+/// A randomizer seeded from the clock, safe to share between threads.
+export fn system() -> Randomizer { fromGenerator(Random.fromClock()) }
+
+/// A randomizer that draws the same sequence for the same seed.
+export fn seeded(seed: Int) -> Randomizer {
+  match convertInteger[UInt64](seed) {
+    case Some(value) => fromGenerator(Random.fromSeed(value))
+    case None => fromGenerator(Random.fromSeed(1u64))
+  }
+}
+
+/// A randomizer whose every draw is `ratio` of the bound, rounded down. `ratio` is clamped to
+/// the range from 0 up to just below 1.
+export fn fixed(ratio: Decimal) -> Randomizer {
+  let parts = if ratio <= 0d { 0 } else if ratio >= 1d { SCALE - 1 } else { Numeric.partsOf(ratio, SCALE) }
+  Randomizer{draw: fn(bound: Int) -> Int {
+      if bound <= 0 { 0 } else { Numeric.multiply(parts, bound) / SCALE }
+    } }
+}
+
+/// A whole number from zero up to, but not including, `bound`; zero for a bound below one.
+export fn below(source: &Randomizer, bound: Int) -> Int {
+  if bound <= 0 { return 0 }
+  let drawn = (source.draw)(bound)
+  if drawn < 0 { 0 } else if drawn >= bound { bound - 1 } else { drawn }
+}
+
+/// A fraction of one in parts of `SCALE`, from zero up to but not including `SCALE`.
+export fn fraction(source: &Randomizer) -> Int { below(source, SCALE) }
+
+/// A float from zero up to but not including one.
+export fn unit(source: &Randomizer) -> Float { Numeric.toFloat(fraction(source)) / Numeric.toFloat(SCALE) }
+
+/// Whether a draw falls below `rate`, a ratio from 0 to 1. A rate of 1 always holds and a rate
+/// of 0 never does.
+export fn chance(source: &Randomizer, rate: Decimal) -> Bool {
+  if rate <= 0d { return false }
+  if rate >= 1d { return true }
+  fraction(source) < Numeric.partsOf(rate, SCALE)
+}
+
+/// A randomizer drawing from a generator kept under a lock.
+fn fromGenerator(start: Random.Generator) -> Randomizer {
+  let state = Shared.shared(start)
+  Randomizer{draw: fn(bound: Int) -> Int {
+      Shared.change(&state, fn(generator: Random.Generator) -> (Random.Generator, Int) { Random.below(&generator, bound) })
+    } }
+}

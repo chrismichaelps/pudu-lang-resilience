@@ -1,0 +1,60 @@
+/** @Chaos.Latency.Strategy — delays a callback before it runs */
+module PuduLangResilience.Chaos.Latency
+
+import Std.Concurrent.Cancel as Cancel
+import PuduLangResilience.Chaos as Chaos
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Chaos.Latency.Injected — the delay injected into one execution */
+export type Injected = { context: Context.Context, latency: Int }
+
+/** @Chaos.Latency.Options — how long to delay and how often */
+export type Options = {
+  name: Option[Str],
+  injection: Chaos.Injection,
+  latency: Int,
+  generator: Option[fn(Chaos.Arguments) -> Int],
+  onInjected: Option[fn(Injected) -> ()]
+}
+
+/// Thirty seconds at the default injection.
+export fn defaults() -> Options { Options{name: None, injection: Chaos.defaults(), latency: 30000, generator: None, onInjected: None} }
+
+/// Injects `millis` of delay at the given injection settings.
+export fn injecting(millis: Int, injection: Chaos.Injection) -> Options { Options{..defaults(), injection: injection, latency: millis} }
+
+/// Every reason the options cannot be followed.
+export fn validate(options: &Options) -> Array[Str] {
+  var problems = Chaos.validate(&options.injection)
+  if options.latency < 0 { problems = problems.push("latency must not be negative") }
+  problems
+}
+
+/// A latency injection strategy following the options. A delay of zero or less injects
+/// nothing; a token firing during the delay answers `Cancelled` without running the callback.
+export fn strategy[T, E](options: Options) -> Strategy.Strategy[T, E] {
+  Strategy.Strategy {
+    name: options.name,
+    kind: "ChaosLatency",
+    summary: "injects " + show(options.latency) + " ms at rate " + show(options.injection.rate),
+    problems: validate(&options),
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      if !Chaos.shouldInject(&options.injection, &context, &runtime.randomizer) { return callback(context) }
+      let latency = match options.generator {
+        case Some(generate) => generate(Chaos.arguments(&context, &runtime.randomizer))
+        case None => options.latency
+      }
+      if latency <= 0 { return callback(context) }
+      Telemetry.report(&runtime.telemetry, &context, Events.ON_LATENCY, Telemetry.Information, None, Telemetry.LatencyInjected(latency))
+      if let Err(why) = Clock.sleep(&runtime.clock, latency, &context.token) { return Err(Resilience.Cancelled(Cancel.explain(&why))) }
+      if let Some(notify) = options.onInjected { notify(Injected{context: context, latency: latency}) }
+      callback(context)
+    }
+  }
+}
