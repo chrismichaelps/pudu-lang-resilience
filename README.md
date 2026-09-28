@@ -6,6 +6,7 @@
   <a href="https://www.pudu-lang.org/">Pudu</a> |
   <a href="https://www.pudu-lang.org/docs">Documentation</a> |
   <a href="https://www.pudu-lang.org/packages">Packages</a> |
+  <a href="https://github.com/chrismichaelps/pudu-lang-resilience/wiki">API docs</a> |
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
