@@ -1,0 +1,74 @@
+/** @Resilience.Timeout.Strategy — cancels a callback that outlives its allowance */
+module PuduLangResilience.Timeout
+
+import Std.Concurrent.Cancel as Cancel
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Resilience.Timeout.Elapsed — the execution a timeout cancelled */
+export type Elapsed = { context: Context.Context, timeout: Int }
+
+/** @Resilience.Timeout.Options — how long a callback may run */
+export type Options = {
+  name: Option[Str],
+  timeout: Int,
+  generator: Option[fn(Context.Context) -> Int],
+  onTimeout: Option[fn(Elapsed) -> ()]
+}
+
+/// The shortest timeout an option may name, in milliseconds.
+const SHORTEST: Int = 10
+
+/// The longest timeout an option may name: one day, in milliseconds.
+const LONGEST: Int = 86400000
+
+/// A thirty-second timeout.
+export fn defaults() -> Options { Options{name: None, timeout: 30000, generator: None, onTimeout: None} }
+
+/// A timeout of `millis`.
+export fn after(millis: Int) -> Options { Options{..defaults(), timeout: millis} }
+
+/// Every reason the options cannot be followed.
+export fn validate(options: &Options) -> Array[Str] {
+  if options.timeout < SHORTEST || options.timeout > LONGEST { ["timeout must be from 10 to 86400000 ms"] } else { [] }
+}
+
+/// A timeout strategy following the options.
+export fn strategy[T, E](options: Options) -> Strategy.Strategy[T, E] {
+  Strategy.Strategy {
+    name: options.name,
+    kind: "Timeout",
+    summary: show(options.timeout) + " ms",
+    problems: validate(&options),
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      execute(&options, &runtime, context, callback)
+    }
+  }
+}
+
+/// Runs the callback with a token that fires once the timeout passes. When the callback answers
+/// a cancellation caused by that token alone, the answer is `TimedOut`; any other outcome passes
+/// through. A generated timeout of zero or less runs the callback without one.
+fn execute[T, E](options: &Options, runtime: &Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+  let timeout = match options.generator {
+    case Some(generate) => generate(context)
+    case None => options.timeout
+  }
+  if timeout <= 0 { return callback(context) }
+  let bounded = Cancel.childExpiring(&context.token, timeout)
+  let outcome = callback(Context.withToken(&context, bounded))
+  let expired = Cancel.reason(&bounded) == Some(Cancel.DeadlineExceeded) && !Cancel.stopped(&context.token)
+  match outcome {
+    case Err(Resilience.Cancelled(_)) => {
+      if !expired { return outcome }
+      Telemetry.report(&runtime.telemetry, &context, Events.ON_TIMEOUT, Telemetry.Error, None, Telemetry.TimeoutElapsed(timeout))
+      if let Some(notify) = options.onTimeout { notify(Elapsed{context: context, timeout: timeout}) }
+      Err(Resilience.TimedOut(timeout))
+    }
+    case _ => outcome
+  }
+}

@@ -1,0 +1,143 @@
+/** @Resilience.Retry.Strategy — runs a callback again after handled failures */
+module PuduLangResilience.Retry
+
+import Std.Concurrent.Cancel as Cancel
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Domain.Backoff as Delays
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience.Randomizer as Randomizer
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Resilience.Retry.Backoff — how the delay grows with each retry */
+export type Backoff = Constant | Linear | Exponential
+
+/** @Resilience.Retry.Retrying — the attempt that failed and the wait before the next */
+export type Retrying[T, E] = {
+  outcome: Resilience.Outcome[T, E],
+  context: Context.Context,
+  attempt: Int,
+  delay: Int,
+  duration: Int
+}
+
+/** @Resilience.Retry.Options — when to retry and how long to wait */
+export type Options[T, E] = {
+  name: Option[Str],
+  shouldHandle: Predicate.Predicate[T, E],
+  maxRetryAttempts: Int,
+  backoff: Backoff,
+  delay: Int,
+  maxDelay: Option[Int],
+  useJitter: Bool,
+  delayGenerator: Option[fn(Predicate.Arguments[T, E]) -> Option[Int]],
+  onRetry: Option[fn(Retrying[T, E]) -> ()]
+}
+
+/// A retry count that never runs out.
+export const UNLIMITED: Int = 9223372036854775807
+
+/// The longest delay or ceiling an option may name: one day, in milliseconds.
+const LONGEST_DELAY: Int = 86400000
+
+/// Three retries of every failure except a cancellation, two seconds apart, without jitter.
+export fn defaults[T, E]() -> Options[T, E] {
+  Options {
+    name: None,
+    shouldHandle: Predicate.failures(),
+    maxRetryAttempts: 3,
+    backoff: Constant,
+    delay: 2000,
+    maxDelay: None,
+    useJitter: false,
+    delayGenerator: None,
+    onRetry: None
+  }
+}
+
+/// Every reason the options cannot be followed.
+export fn validate[T, E](options: &Options[T, E]) -> Array[Str] {
+  var problems: Array[Str] = []
+  if options.maxRetryAttempts < 1 { problems = problems.push("maxRetryAttempts must be at least 1") }
+  if options.delay < 0 || options.delay > LONGEST_DELAY { problems = problems.push("delay must be from 0 to 86400000 ms") }
+  if let Some(ceiling) = options.maxDelay {
+    if ceiling < 0 || ceiling > LONGEST_DELAY { problems = problems.push("maxDelay must be from 0 to 86400000 ms") }
+  }
+  problems
+}
+
+/// A retry strategy following the options.
+export fn strategy[T, E](options: Options[T, E]) -> Strategy.Strategy[T, E] {
+  Strategy.Strategy {
+    name: options.name,
+    kind: "Retry",
+    summary: describe(&options),
+    problems: validate(&options),
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      execute(&options, &runtime, context, callback)
+    }
+  }
+}
+
+/// One line naming the retry count, backoff, and base delay.
+fn describe[T, E](options: &Options[T, E]) -> Str {
+  let count = if options.maxRetryAttempts == UNLIMITED { "unlimited" } else { show(options.maxRetryAttempts) }
+  let shape = match options.backoff {
+    case Constant => "constant"
+    case Linear => "linear"
+    case Exponential => "exponential"
+  }
+  let jitter = if options.useJitter { " with jitter" } else { "" }
+  count + " retries, " + shape + " backoff from " + show(options.delay) + " ms" + jitter
+}
+
+/// The backoff inputs the options name.
+fn plan[T, E](options: &Options[T, E]) -> Delays.Plan {
+  let shape = match options.backoff {
+    case Constant => Delays.Constant
+    case Linear => Delays.Linear
+    case Exponential => Delays.Exponential
+  }
+  Delays.Plan{shape: shape, delay: options.delay, maxDelay: options.maxDelay, useJitter: options.useJitter}
+}
+
+/// Runs the callback until it answers an outcome the predicate does not handle, the retries run
+/// out, or the context's token fires while waiting.
+fn execute[T, E](options: &Options[T, E], runtime: &Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+  var attempt = 0
+  var state = 0.0
+  loop {
+    let started = Clock.now(&runtime.clock)
+    let outcome = callback(context)
+    let judged = Predicate.arguments(outcome, context, attempt)
+    let handled = (options.shouldHandle)(judged)
+    let duration = Clock.now(&runtime.clock) - started
+    let last = attempt != UNLIMITED && attempt >= options.maxRetryAttempts
+    let severity = if !handled { Telemetry.Information } else if last { Telemetry.Error } else { Telemetry.Warning }
+    Telemetry.report(&runtime.telemetry, &context, Events.EXECUTION_ATTEMPT, severity, Some(Resilience.summarize(&outcome)), Telemetry.Attempted(attempt, duration, handled))
+    if last || !handled { return outcome }
+    let computed = Delays.next(&plan(options), attempt, state, Randomizer.unit(&runtime.randomizer))
+    state = computed[1]
+    var delay = computed[0]
+    if let Some(generate) = options.delayGenerator {
+      if let Some(generated) = generate(judged) {
+        if generated >= 0 { delay = generated }
+      }
+    }
+    Telemetry.report(&runtime.telemetry, &context, Events.ON_RETRY, Telemetry.Warning, Some(Resilience.summarize(&outcome)), Telemetry.Retrying(attempt, delay))
+    if let Some(notify) = options.onRetry {
+      notify(Retrying{outcome: outcome, context: context, attempt: attempt, delay: delay, duration: duration})
+    }
+    if let Err(stopped) = Context.check(&context) { return Err(stopped) }
+    if delay > 0 {
+      if let Err(why) = Clock.sleep(&runtime.clock, delay, &context.token) {
+        return Err(Resilience.Cancelled(Cancel.explain(&why)))
+      }
+    }
+    if attempt != UNLIMITED { attempt = attempt + 1 }
+  }
+}

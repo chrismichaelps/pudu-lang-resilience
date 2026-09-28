@@ -1,0 +1,136 @@
+/** @Test.Hedging.Suite — racing attempts, choosing a winner, and ending the rest */
+module PuduLangResilience.HedgingTest
+
+import Std.Io as Io
+import Std.Result as Result
+import Std.Sync as Sync
+import Std.Test as Test
+import Std.Time as Time
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Hedging as Hedging
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+
+/// A pipeline of one hedging strategy.
+fn hedged(options: Hedging.Options[Int, Str]) -> Pipeline.Pipeline[Int, Str] {
+  match Pipeline.build([Hedging.strategy(options)]) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// A callback whose first call waits for cancellation and whose later calls answer at once,
+/// counting calls and cancellations.
+fn slowThenFast(calls: &Sync.Counter, cancelled: &Sync.Counter) -> Strategy.Callback[Int, Str] {
+  let counter = *calls
+  let stops = *cancelled
+  fn(context: Context.Context) -> Resilience.Outcome[Int, Str] {
+    let made = match Sync.increment(&counter, 1) { case Ok(n) => n case Err(_) => 0 }
+    if made == 1 {
+      if let Err(why) = Context.pause(&context, 5000) {
+        let _stopped = Sync.increment(&stops, 1)
+        return Err(why)
+      }
+      return Ok(1)
+    }
+    Ok(made)
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let fastCalls = Sync.counter(0)
+  let fast = Pipeline.execute(&hedged(Hedging.defaults()), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let _counted = Sync.increment(&fastCalls, 1)
+      Ok(7)
+    })
+
+  let calls = Sync.counter(0)
+  let cancelled = Sync.counter(0)
+  let hedges: Sync.Cell[Array[Int]] = Sync.cell([])
+  let started = Time.elapsed()
+  let raced = Pipeline.execute(&hedged(Hedging.Options{..Hedging.defaults(), delay: 30, onHedging: Some(fn(given: Hedging.Hedged) -> () {
+            let held = match Sync.get(&hedges) { case Ok(list) => list case Err(_) => [] }
+            let _kept = Sync.set(&hedges, held.push(given.attempt))
+          }) }), slowThenFast(&calls, &cancelled))
+  let raceTook = Time.elapsed() - started
+
+  let fallbackCalls = Sync.counter(0)
+  let fallbackMode = Pipeline.execute(&hedged(Hedging.Options{..Hedging.defaults(), delay: Hedging.WAIT_FOR_OUTCOME}), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let made = match Sync.increment(&fallbackCalls, 1) { case Ok(n) => n case Err(_) => 0 }
+      if made == 1 { Resilience.raise("primary failed") } else { Ok(made) }
+    })
+
+  let failingCalls = Sync.counter(0)
+  let allFail = Pipeline.execute(&hedged(Hedging.Options{..Hedging.defaults(), maxHedgedAttempts: 2, delay: 0}), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let _counted = Sync.increment(&failingCalls, 1)
+      Resilience.raise("down")
+    })
+
+  let declinedCalls = Sync.counter(0)
+  let declining = Hedging.Options{..Hedging.defaults(), delay: 0, actionGenerator: Some(fn(_action: Hedging.Action[Int, Str]) -> Option[Strategy.Callback[Int, Str]] { None })}
+  let declined = Pipeline.execute(&hedged(declining), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let _counted = Sync.increment(&declinedCalls, 1)
+      Resilience.raise("only attempt")
+    })
+
+  let generating = Hedging.Options{..Hedging.defaults(), delay: Hedging.WAIT_FOR_OUTCOME, actionGenerator: Some(fn(action: Hedging.Action[Int, Str]) -> Option[Strategy.Callback[Int, Str]] {
+        let number = action.attempt
+        Some(fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Ok(100 + number) })
+      }) }
+  let generated = Pipeline.execute(&hedged(generating), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Resilience.raise("primary") })
+
+  let marker = Context.textKey("served-by")
+  let caller = Context.create()
+  let adoptCalls = Sync.counter(0)
+  let adopted = Pipeline.executeWith(&hedged(Hedging.Options{..Hedging.defaults(), delay: Hedging.WAIT_FOR_OUTCOME}), caller, fn(context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let made = match Sync.increment(&adoptCalls, 1) { case Ok(n) => n case Err(_) => 0 }
+      if made == 1 {
+        Context.set(&context, &marker, "primary")
+        Resilience.raise("first")
+      } else {
+        Context.set(&context, &marker, "hedge")
+        Ok(2)
+      }
+    })
+
+  let crashed = Pipeline.execute(&hedged(Hedging.Options{..Hedging.defaults(), maxHedgedAttempts: 1, delay: Hedging.WAIT_FOR_OUTCOME, shouldHandle: Predicate.never()}), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { panic("boom") })
+
+  let delays: Sync.Cell[Array[Int]] = Sync.cell([])
+  let generatedDelay = Hedging.Options{..Hedging.defaults(), maxHedgedAttempts: 3, delayGenerator: Some(fn(given: Hedging.DelayArguments) -> Int {
+        let held = match Sync.get(&delays) { case Ok(list) => list case Err(_) => [] }
+        let _kept = Sync.set(&delays, held.push(given.attempt))
+        if given.attempt == 2 { Hedging.WAIT_FOR_OUTCOME } else { 0 }
+      }) }
+  let _generatedRun = Pipeline.execute(&hedged(generatedDelay), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Resilience.raise("down") })
+
+  let invalid = Hedging.validate(&Hedging.Options{..Hedging.defaults(), maxHedgedAttempts: 11, delay: -2})
+  let checks = Test.suite("Hedging", &[
+      Test.equals("a fast primary answers alone", &fast, &Ok(7)),
+      Test.equals("a fast primary starts no hedge", &Sync.count(&fastCalls), &Ok(1)),
+      Test.equals("a slow primary loses to its hedge", &raced, &Ok(2)),
+      Test.equals("onHedging sees the hedged attempt", &Sync.get(&hedges), &Ok([1])),
+      Test.equals("the losing attempt is cancelled", &Sync.count(&cancelled), &Ok(1)),
+      Test.that("the race ends without waiting out the slow primary", raceTook < 4000),
+      Test.equals("waiting for the outcome hedges after a failure", &fallbackMode, &Ok(2)),
+      Test.equals("when every attempt fails a failure is answered", &allFail, &Resilience.raise("down")),
+      Test.equals("every allowed attempt runs", &Sync.count(&failingCalls), &Ok(3)),
+      Test.equals("a declined hedge leaves the primary's outcome", &declined, &Resilience.raise("only attempt")),
+      Test.equals("a declined hedge runs nothing more", &Sync.count(&declinedCalls), &Ok(1)),
+      Test.equals("a generated action runs as the hedge", &generated, &Ok(101)),
+      Test.equals("the winner answers", &adopted, &Ok(2)),
+      Test.equals("only the winner's properties reach the caller", &Context.get(&caller, &marker), &Some("hedge")),
+      Test.that("a crashed attempt is answered as crashed", match crashed { case Err(Resilience.Crashed(_)) => true case _ => false }),
+      Test.equals("the delay generator is asked once for each hedge", &Sync.get(&delays), &Ok([1, 2, 3])),
+      Test.equals("invalid options are refused", &invalid, &["maxHedgedAttempts must be from 1 to 10", "delay must be from -1 to 86400000 ms"]),
+      Test.that("the bounds themselves are accepted", Hedging.validate(&Hedging.Options{..Hedging.defaults(), maxHedgedAttempts: 10, delay: Hedging.WAIT_FOR_OUTCOME}).isEmpty()),
+      Test.that("building refuses invalid options", Result.isErr(&Pipeline.build([Hedging.strategy(Hedging.Options{..Hedging.defaults(), maxHedgedAttempts: 0})])))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

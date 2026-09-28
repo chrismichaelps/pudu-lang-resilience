@@ -1,0 +1,72 @@
+/** @Test.Integration.Scenario — every strategy stacked in one pipeline */
+module Integration.PipelineScenarioTest
+
+import Std.Io as Io
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.CircuitBreaker as CircuitBreaker
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Fallback as Fallback
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience.RateLimiter as RateLimiter
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Telemetry.Meter as Meter
+import PuduLangResilience.Timeout as Timeout
+
+/// Runs the suite.
+fn main() -> Int {
+  let clock = Clock.manual(0)
+  let meter = Meter.create()
+  let provider = CircuitBreaker.stateProvider()
+  let settings = Pipeline.Options{..Pipeline.defaults(), name: Some("inventory"), clock: Clock.ofManual(&clock), listeners: [Meter.listener(&meter)]}
+  let built = Pipeline.buildWith(&settings, [
+      Fallback.strategy(Fallback.Options{..Fallback.withValue(-1), shouldHandle: Predicate.brokenCircuits()}),
+      RateLimiter.strategy(RateLimiter.concurrency(4, 0)),
+      Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 2, delay: 100, shouldHandle: Predicate.anyOf(&[Predicate.raised(|problem: Str| problem == "transient"), Predicate.timeouts()])}),
+      CircuitBreaker.strategy(CircuitBreaker.Options{..CircuitBreaker.defaults(), failureRatio: 0.5d, minimumThroughput: 4, samplingDuration: 10000, breakDuration: 1000, stateProvider: Some(provider)}),
+      Timeout.strategy(Timeout.after(200))
+    ])
+  let pipeline = match built {
+    case Ok(found) => found
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+  let calls = Sync.counter(0)
+  let flaky = fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+    let made = match Sync.increment(&calls, 1) { case Ok(n) => n case Err(_) => 0 }
+    if made % 2 == 1 { Resilience.raise("transient") } else { Ok(made) }
+  }
+  let recovered = Pipeline.execute(&pipeline, flaky)
+  let down = fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Resilience.raise("transient") }
+  let exhausted = Pipeline.execute(&pipeline, down)
+  let stateAfterFailures = CircuitBreaker.state(&provider)
+  let fellBack = Pipeline.execute(&pipeline, flaky)
+  let fatal = Pipeline.execute(&pipeline, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Resilience.raise("fatal") })
+  let timedOut = Pipeline.execute(&match Pipeline.build([Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 1, delay: 0, shouldHandle: Predicate.timeouts()}), Timeout.strategy(Timeout.after(20))]) {
+      case Ok(found) => found
+      case Err(invalid) => panic(Pipeline.explain(&invalid))
+    }, fn(context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      Context.pause(&context, 1000) ?
+      Ok(0)
+    })
+  let checks = Test.suite("Integration.PipelineScenario", &[
+      Test.equals("a transient failure is retried to success", &recovered, &Ok(2)),
+      Test.equals("a circuit opening during retries hands its rejection to the fallback", &exhausted, &Ok(-1)),
+      Test.equals("the failures open the circuit", &stateAfterFailures, &Some(CircuitBreaker.Open)),
+      Test.equals("an open circuit falls back to the substitute", &fellBack, &Ok(-1)),
+      Test.equals("an open circuit keeps rejecting whatever the callback would do", &fatal, &Ok(-1)),
+      Test.equals("each timeout is retried and the last one answered", &timedOut, &Err(Resilience.TimedOut(20))),
+      Test.equals("the retries waited on the pipeline clock", &Clock.sleeps(&clock), &[100, 100, 100]),
+      Test.equals("every execution is metered", &Meter.count(&meter, "PipelineExecuted"), &4),
+      Test.equals("the circuit opened once", &Meter.count(&meter, "OnCircuitOpened"), &1),
+      Test.equals("every fallback is metered", &Meter.count(&meter, "OnFallback"), &3),
+      Test.equals("a rejection by the circuit ends the retries after one attempt", &Meter.count(&meter, "ExecutionAttempt"), &7)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

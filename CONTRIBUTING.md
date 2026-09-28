@@ -19,8 +19,10 @@ change; code, tests, and the matching wiki pages move together.
 
 ## Code
 
-- Dependencies point inward: the public strategy modules, then `Core`, then `Domain`, then
-  `Utils` and `Constants`. `Domain` performs no effects.
+- Dependencies point inward: the public modules use `Domain`, which uses `Utils` and
+  `Constants`. `Domain` performs no effects and imports no public module.
+- Strategies reach time, randomness, and telemetry only through the runtime their pipeline
+  lends them.
 - Every module the package ships is `PuduLangResilience` or lives under `src/PuduLangResilience/`.
 - Every file and exported type starts with a one-line `/** @Namespace.Entity.Role — intent */`
   anchor, and every function and constant carries a short `///` comment saying what it answers.

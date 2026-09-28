@@ -1,0 +1,90 @@
+/** @Limiter.Engine.Module — thread-safe leasing over one permit algorithm */
+module PuduLangResilience.Limiter.Engine
+
+import Std.Concurrent.Cancel as Cancel
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Domain.Permits as Permits
+import PuduLangResilience.Limiter as Limiter
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Limiter.Engine.Queueing — the limits every engine enforces */
+export type Queueing = { permitLimit: Int, queueLimit: Int, order: Limiter.QueueOrder }
+
+/// How long a queued request waits before asking again, in milliseconds.
+const POLL_MILLIS: Int = 1
+
+/// A limiter over `algorithm`, starting from `held`, reading time from `clock`.
+export fn limiter[S](held: S, algorithm: Permits.Algorithm[S], queueing: &Queueing, clock: Clock.Clock) -> Limiter.Limiter {
+  let order = match queueing.order {
+    case Limiter.OldestFirst => Permits.Oldest
+    case Limiter.NewestFirst => Permits.Newest
+  }
+  let book = Shared.shared(Permits.open(held, queueing.permitLimit, queueing.queueLimit, order))
+  Limiter.Limiter {
+    acquire: fn(permits: Int, token: Cancel.Token) -> Limiter.Lease { acquire(&book, &algorithm, &clock, permits, &token) },
+    attempt: fn(permits: Int) -> Limiter.Lease { attempt(&book, &algorithm, &clock, permits) },
+    statistics: fn() -> Limiter.Statistics {
+      let now = Clock.now(&clock)
+      let current = Shared.current(&book)
+      Limiter.Statistics{available: Permits.available(&current, &algorithm, now), queued: Permits.queued(&current), failed: current.failed, succeeded: current.succeeded}
+    },
+    replenish: fn() -> Bool {
+      Shared.change(&book, fn(current: Permits.Book[S]) -> (Permits.Book[S], Bool) { Permits.replenish(&current, &algorithm) })
+    }
+  }
+}
+
+/// Leases permits without queueing.
+fn attempt[S](book: &Shared.Shared[Permits.Book[S]], algorithm: &Permits.Algorithm[S], clock: &Clock.Clock, permits: Int) -> Limiter.Lease {
+  let now = Clock.now(clock)
+  let decided = Shared.change(book, fn(current: Permits.Book[S]) -> (Permits.Book[S], Permits.Decision) { Permits.request(&current, algorithm, now, permits, false) })
+  answer(book, algorithm, permits, decided)
+}
+
+/// Leases permits, queueing and asking again on the clock until they are granted, the request
+/// is evicted, or the token fires.
+fn acquire[S](book: &Shared.Shared[Permits.Book[S]], algorithm: &Permits.Algorithm[S], clock: &Clock.Clock, permits: Int, token: &Cancel.Token) -> Limiter.Lease {
+  if let Err(why) = Cancel.check(token) { return Limiter.refused(Limiter.Abandoned(Cancel.explain(&why))) }
+  let now = Clock.now(clock)
+  let decided = Shared.change(book, fn(current: Permits.Book[S]) -> (Permits.Book[S], Permits.Decision) { Permits.request(&current, algorithm, now, permits, true) })
+  match decided {
+    case Permits.Queue(ticket) => wait(book, algorithm, clock, permits, ticket, token)
+    case _ => answer(book, algorithm, permits, decided)
+  }
+}
+
+/// Waits in the queue holding `ticket`.
+fn wait[S](book: &Shared.Shared[Permits.Book[S]], algorithm: &Permits.Algorithm[S], clock: &Clock.Clock, permits: Int, ticket: Int, token: &Cancel.Token) -> Limiter.Lease {
+  loop {
+    let now = Clock.now(clock)
+    let turn = Shared.change(book, fn(current: Permits.Book[S]) -> (Permits.Book[S], Permits.Turn) { Permits.poll(&current, algorithm, now, ticket) })
+    match turn {
+      case Permits.Taken => { return lease(book, algorithm, permits) }
+      case Permits.Evicted => { return Limiter.refused(Limiter.Denied(None)) }
+      case Permits.Waiting => {
+        if let Err(why) = Clock.sleep(clock, POLL_MILLIS, token) {
+          Shared.update(book, fn(current: Permits.Book[S]) -> Permits.Book[S] { Permits.withdraw(&current, ticket) })
+          return Limiter.refused(Limiter.Abandoned(Cancel.explain(&why)))
+        }
+      }
+    }
+  }
+}
+
+/// The lease a decision grants or refuses.
+fn answer[S](book: &Shared.Shared[Permits.Book[S]], algorithm: &Permits.Algorithm[S], permits: Int, decided: Permits.Decision) -> Limiter.Lease {
+  match decided {
+    case Permits.Grant => lease(book, algorithm, permits)
+    case Permits.Deny(retryAfter) => Limiter.refused(Limiter.Denied(retryAfter))
+    case Permits.Queue(_) => Limiter.refused(Limiter.Denied(None))
+  }
+}
+
+/// A granted lease that hands `permits` back to the book on release.
+fn lease[S](book: &Shared.Shared[Permits.Book[S]], algorithm: &Permits.Algorithm[S], permits: Int) -> Limiter.Lease {
+  let target = *book
+  let counting = *algorithm
+  Limiter.granted(fn() -> () {
+      Shared.update(&target, fn(current: Permits.Book[S]) -> Permits.Book[S] { Permits.giveBack(&current, &counting, permits) })
+    })
+}

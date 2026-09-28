@@ -1,0 +1,149 @@
+/** @Resilience.Pipeline.Backbone — composes strategies into one executable policy */
+module PuduLangResilience.Pipeline
+
+import Std.List as List
+import Std.Option as Option
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Constants.Messages as Messages
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Randomizer as Randomizer
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+import PuduLangResilience.Utils.Template as Template
+
+/** @Resilience.Pipeline.Options — identity, effects, and telemetry of a pipeline */
+export type Options = {
+  name: Option[Str],
+  instance: Option[Str],
+  clock: Clock.Clock,
+  randomizer: Randomizer.Randomizer,
+  listeners: Array[Telemetry.Listener],
+  severityOf: Option[fn(Telemetry.Event) -> Telemetry.Severity]
+}
+
+/** @Resilience.Pipeline.Pipeline — strategies composed outermost first */
+export type Pipeline[T, E] = {
+  name: Option[Str],
+  instance: Option[Str],
+  strategies: Array[Strategy.Strategy[T, E]],
+  clock: Clock.Clock,
+  telemetry: Telemetry.Reporter,
+  run: fn(Context.Context, Strategy.Callback[T, E]) -> Resilience.Outcome[T, E]
+}
+
+/** @Resilience.Pipeline.Invalid — every reason a pipeline could not be built */
+export type Invalid = { problems: Array[Str] }
+
+/** @Resilience.Pipeline.Descriptor — what a built pipeline is made of */
+export type Descriptor = { name: Option[Str], instance: Option[Str], strategies: Array[Described] }
+
+/** @Resilience.Pipeline.Described — one strategy of a built pipeline */
+export type Described = { name: Option[Str], kind: Str, summary: Str }
+
+/// No name, the system clock and randomizer, and no listeners.
+export fn defaults() -> Options {
+  Options{name: None, instance: None, clock: Clock.system(), randomizer: Randomizer.system(), listeners: [], severityOf: None}
+}
+
+/// A pipeline of `strategies` with the default options. The first strategy is the outermost.
+export fn build[T, E](strategies: Array[Strategy.Strategy[T, E]]) -> Result[Pipeline[T, E], Invalid] {
+  buildWith(&defaults(), strategies)
+}
+
+/// A pipeline of `strategies` with the given options, or every problem found in the options of
+/// its strategies and every strategy name used twice.
+export fn buildWith[T, E](options: &Options, strategies: Array[Strategy.Strategy[T, E]]) -> Result[Pipeline[T, E], Invalid] {
+  var problems: Array[Str] = []
+  var seen: Array[Str] = []
+  for layer in strategies {
+    let label = Option.unwrapOr(layer.name, layer.kind)
+    for problem in layer.problems { problems = problems.push(label + ": " + problem) }
+    if let Some(name) = layer.name {
+      if List.contains(&seen, name) { problems = problems.push("the strategy name '" + name + "' is used more than once") }
+      seen = seen.push(name)
+    }
+  }
+  if !problems.isEmpty() { return Err(Invalid{problems: problems}) }
+  let base = Telemetry.reporter(Telemetry.Source{pipelineName: options.name, pipelineInstance: options.instance, strategyName: None}, &options.listeners, &options.severityOf)
+  var composed = fn(context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] { callback(context) }
+  var index = strategies.length() - 1
+  while index >= 0 {
+    let layer = strategies[index]
+    let runtime = Strategy.Runtime{clock: options.clock, randomizer: options.randomizer, telemetry: Telemetry.forStrategy(&base, layer.name)}
+    (layer.attach)(runtime)
+    let inner = composed
+    composed = fn(context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      (layer.execute)(runtime, context, fn(passed: Context.Context) -> Resilience.Outcome[T, E] { inner(passed, callback) })
+    }
+    index = index - 1
+  }
+  Ok(Pipeline{name: options.name, instance: options.instance, strategies: strategies, clock: options.clock, telemetry: base, run: composed})
+}
+
+/// A pipeline with no strategies: it runs every callback once, as given.
+export fn empty[T, E]() -> Pipeline[T, E] {
+  match build([]) {
+    case Ok(pipeline) => pipeline
+    case Err(_) => panic("a pipeline without strategies has nothing to refuse")
+  }
+}
+
+/// Runs a callback through the pipeline with a fresh context.
+export fn execute[T, E](pipeline: &Pipeline[T, E], callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+  executeWith(pipeline, Context.create(), callback)
+}
+
+/// Runs a callback through the pipeline with the given context, reporting the execution's start
+/// and, with its duration and outcome, its end.
+export fn executeWith[T, E](pipeline: &Pipeline[T, E], context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+  Telemetry.report(&pipeline.telemetry, &context, Events.PIPELINE_EXECUTING, Telemetry.Debug, None, Telemetry.Executing)
+  let started = Clock.now(&pipeline.clock)
+  let outcome = (pipeline.run)(context, callback)
+  let severity = match outcome {
+    case Ok(_) => Telemetry.Information
+    case Err(_) => Telemetry.Warning
+  }
+  let elapsed = Clock.now(&pipeline.clock) - started
+  Telemetry.report(&pipeline.telemetry, &context, Events.PIPELINE_EXECUTED, severity, Some(Resilience.summarize(&outcome)), Telemetry.Executed(elapsed))
+  outcome
+}
+
+/// Runs a callback that answers a plain `Result` through the pipeline with a fresh context; its
+/// error becomes `Raised`.
+export fn run[T, E](pipeline: &Pipeline[T, E], action: fn(Context.Context) -> Result[T, E]) -> Resilience.Outcome[T, E] {
+  runWith(pipeline, Context.create(), action)
+}
+
+/// `run` with the given context.
+export fn runWith[T, E](pipeline: &Pipeline[T, E], context: Context.Context, action: fn(Context.Context) -> Result[T, E]) -> Resilience.Outcome[T, E] {
+  executeWith(pipeline, context, fn(passed: Context.Context) -> Resilience.Outcome[T, E] { Resilience.lift(action(passed)) })
+}
+
+/// The pipeline as one strategy of another. It keeps its own clock and telemetry.
+export fn asStrategy[T, E](pipeline: &Pipeline[T, E]) -> Strategy.Strategy[T, E] {
+  let nested = *pipeline
+  Strategy.Strategy {
+    name: nested.name,
+    kind: "Pipeline",
+    summary: show(nested.strategies.length()) + " strategies",
+    problems: [],
+    attach: Strategy.detached,
+    execute: fn(_runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      executeWith(&nested, context, callback)
+    }
+  }
+}
+
+/// The name, instance, and strategies of a pipeline, outermost first.
+export fn describe[T, E](pipeline: &Pipeline[T, E]) -> Descriptor {
+  Descriptor {
+    name: pipeline.name,
+    instance: pipeline.instance,
+    strategies: pipeline.strategies.map(fn(layer: Strategy.Strategy[T, E]) -> Described { Described{name: layer.name, kind: layer.kind, summary: layer.summary} })
+  }
+}
+
+/// One line per problem.
+export fn explain(invalid: &Invalid) -> Str { Template.fill(Messages.PIPELINE_INVALID, &[invalid.problems.join(Messages.PROBLEM_SEPARATOR)]) }

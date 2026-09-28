@@ -1,0 +1,102 @@
+/** @Resilience.Limiter.Seam — permits leased by rate and concurrency limiters */
+module PuduLangResilience.Limiter
+
+import Std.Concurrent.Cancel as Cancel
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Resilience.Limiter.QueueOrder — which queued request is served first */
+export type QueueOrder = OldestFirst | NewestFirst
+
+/** @Resilience.Limiter.Grant — whether a request was given its permits */
+export type Grant = Granted | Denied(Option[Int]) | Abandoned(Str)
+
+/** @Resilience.Limiter.Lease — the answer to one request and how to hand its permits back */
+export type Lease = { grant: Grant, release: fn() -> () }
+
+/** @Resilience.Limiter.Statistics — a limiter's counts at one moment */
+export type Statistics = { available: Int, queued: Int, failed: Int, succeeded: Int }
+
+/** @Resilience.Limiter.Limiter — leases permits, waiting or at once */
+export type Limiter = {
+  acquire: fn(Int, Cancel.Token) -> Lease,
+  attempt: fn(Int) -> Lease,
+  statistics: fn() -> Statistics,
+  replenish: fn() -> Bool
+}
+
+/// Requests `permits`, waiting in the limiter's queue while it has room; the lease is
+/// `Abandoned` when the token fires first.
+export fn acquire(limiter: &Limiter, permits: Int, token: &Cancel.Token) -> Lease { (limiter.acquire)(permits, *token) }
+
+/// Requests `permits` without waiting.
+export fn attempt(limiter: &Limiter, permits: Int) -> Lease { (limiter.attempt)(permits) }
+
+/// The limiter's counts now.
+export fn statistics(limiter: &Limiter) -> Statistics { (limiter.statistics)() }
+
+/// Adds one period's permits to a limiter replenished by hand; whether it did.
+export fn replenish(limiter: &Limiter) -> Bool { (limiter.replenish)() }
+
+/// Whether the lease holds its permits.
+export fn isGranted(lease: &Lease) -> Bool { lease.grant == Granted }
+
+/// Hands a lease's permits back. Releasing twice hands them back once.
+export fn release(lease: &Lease) -> () { (lease.release)() }
+
+/// A lease that holds nothing and releases nothing.
+export fn refused(grant: Grant) -> Lease { Lease{grant: grant, release: fn() -> () { () }} }
+
+/// A lease granted with `handBack` run on its first release only.
+export fn granted(handBack: fn() -> ()) -> Lease {
+  let spent = Shared.shared(false)
+  Lease{grant: Granted, release: fn() -> () {
+      let first = Shared.change(&spent, fn(held: Bool) -> (Bool, Bool) { (true, !held) })
+      if first { handBack() }
+    } }
+}
+
+/// A limiter granting a request only when every limiter in order grants it. A refusal releases
+/// the leases already taken and answers that refusal.
+export fn chain(limiters: Array[Limiter]) -> Limiter {
+  Limiter {
+    acquire: fn(permits: Int, token: Cancel.Token) -> Lease { chained(&limiters, fn(limiter: Limiter) -> Lease { acquire(&limiter, permits, &token) }) },
+    attempt: fn(permits: Int) -> Lease { chained(&limiters, fn(limiter: Limiter) -> Lease { attempt(&limiter, permits) }) },
+    statistics: fn() -> Statistics { combined(&limiters) },
+    replenish: fn() -> Bool {
+      var any = false
+      for limiter in limiters {
+        if replenish(&limiter) { any = true }
+      }
+      any
+    }
+  }
+}
+
+/// Takes a lease from each limiter in order, stopping at the first refusal.
+fn chained(limiters: &Array[Limiter], take: fn(Limiter) -> Lease) -> Lease {
+  var held: Array[Lease] = []
+  for limiter in limiters {
+    let lease = take(limiter)
+    if !isGranted(&lease) {
+      for taken in held { release(&taken) }
+      return lease
+    }
+    held = held.push(lease)
+  }
+  granted(fn() -> () {
+      for taken in held { release(&taken) }
+    })
+}
+
+/// The smallest availability and the summed counts of a chain.
+fn combined(limiters: &Array[Limiter]) -> Statistics {
+  var total = Statistics{available: 0, queued: 0, failed: 0, succeeded: 0}
+  var first = true
+  for limiter in limiters {
+    let counts = statistics(&limiter)
+    let available = if first || counts.available < total.available { counts.available } else { total.available }
+    total = Statistics{available: available, queued: total.queued + counts.queued, failed: total.failed + counts.failed, succeeded: total.succeeded + counts.succeeded}
+    first = false
+  }
+  total
+}

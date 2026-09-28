@@ -1,0 +1,41 @@
+/** @Constants.Messages.Module — every sentence the package reports */
+module PuduLangResilience.Constants.Messages
+
+/// A failure raised by the callback; `<1>` is the error.
+export const RAISED: Str = "The operation failed: <1>"
+
+/// A timeout; `<1>` is the timeout in milliseconds.
+export const TIMED_OUT: Str = "The operation did not complete within <1> ms."
+
+/// An open circuit; `<1>` is the wait in milliseconds before it may be tried again.
+export const BROKEN_CIRCUIT: Str = "The circuit is open; it may be tried again in <1> ms."
+
+/// An isolated circuit.
+export const ISOLATED_CIRCUIT: Str = "The circuit is isolated and admits no execution."
+
+/// A rate limiter rejection with a known wait; `<1>` is the wait in milliseconds.
+export const RATE_LIMITED_AFTER: Str = "The rate limiter rejected the execution; retry after <1> ms."
+
+/// A rate limiter rejection without a known wait.
+export const RATE_LIMITED: Str = "The rate limiter rejected the execution."
+
+/// A cancellation; `<1>` is its reason.
+export const CANCELLED: Str = "The operation was cancelled: <1>"
+
+/// A callback that stopped its thread; `<1>` is what it said.
+export const CRASHED: Str = "The operation stopped its thread: <1>"
+
+/// An outcome holding a value; `<1>` is the value.
+export const SUCCEEDED: Str = "Ok(<1>)"
+
+/// A pipeline refused at build time; `<1>` is its problems.
+export const PIPELINE_INVALID: Str = "The pipeline is invalid: <1>"
+
+/// A registry key without a builder; `<1>` is the key.
+export const REGISTRY_NOT_FOUND: Str = "No pipeline builder is registered for '<1>'."
+
+/// A registry key whose pipeline is refused; `<1>` is the key and `<2>` its problems.
+export const REGISTRY_INVALID: Str = "The pipeline for '<1>' is invalid: <2>"
+
+/// What separates problems listed in one sentence.
+export const PROBLEM_SEPARATOR: Str = "; "

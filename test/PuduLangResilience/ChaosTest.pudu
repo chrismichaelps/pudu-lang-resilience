@@ -1,0 +1,119 @@
+/** @Test.Chaos.Suite — injected faults, outcomes, latency, and behavior */
+module PuduLangResilience.ChaosTest
+
+import Std.Io as Io
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Chaos.Behavior as Behavior
+import PuduLangResilience.Chaos as Chaos
+import PuduLangResilience.Chaos.Fault as Fault
+import PuduLangResilience.Chaos.Latency as Latency
+import PuduLangResilience.Chaos.Outcome as Outcome
+import PuduLangResilience.Chaos.Weighted as Weighted
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Randomizer as Randomizer
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+
+/// A pipeline of `layers` on a manual clock whose every draw is `draw` of its bound.
+fn chaotic(layers: Array[Strategy.Strategy[Int, Str]], clock: &Clock.Manual, draw: Decimal) -> Pipeline.Pipeline[Int, Str] {
+  let settings = Pipeline.Options{..Pipeline.defaults(), clock: Clock.ofManual(clock), randomizer: Randomizer.fixed(draw)}
+  match Pipeline.buildWith(&settings, layers) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// A callback answering 1 and counting its calls.
+fn counted(calls: &Sync.Counter) -> Strategy.Callback[Int, Str] {
+  let counter = *calls
+  fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+    let _counted = Sync.increment(&counter, 1)
+    Ok(1)
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let clock = Clock.manual(0)
+  let calls = Sync.counter(0)
+  let fault = Fault.injecting(Resilience.Raised("injected"), Chaos.atRate(0.6d))
+  let injected = Pipeline.execute(&chaotic([Fault.strategy(fault)], &clock, 0.5d), counted(&calls))
+  let skipped = Pipeline.execute(&chaotic([Fault.strategy(Fault.Options{..fault, injection: Chaos.atRate(0.4d)})], &clock, 0.5d), counted(&calls))
+  let disabled = Pipeline.execute(&chaotic([Fault.strategy(Fault.Options{..fault, injection: Chaos.Injection{..Chaos.always(), enabled: false}})], &clock, 0.5d), counted(&calls))
+  let byKey = Chaos.Injection{..Chaos.always(), enabledGenerator: Some(fn(context: Context.Context) -> Bool { context.operationKey == Some("chaos") })}
+  let keyedOn = Pipeline.executeWith(&chaotic([Fault.strategy(Fault.Options{..fault, injection: byKey})], &clock, 0.5d), Context.keyed("chaos"), counted(&calls))
+  let keyedOff = Pipeline.executeWith(&chaotic([Fault.strategy(Fault.Options{..fault, injection: byKey})], &clock, 0.5d), Context.keyed("calm"), counted(&calls))
+  let generatedRate = Chaos.Injection{..Chaos.defaults(), rateGenerator: Some(fn(_context: Context.Context) -> Decimal { 2d })}
+  let clampedRate = Pipeline.execute(&chaotic([Fault.strategy(Fault.Options{..fault, injection: generatedRate})], &clock, 0.99d), counted(&calls))
+  let weighted = Fault.Options{..Fault.defaults(), injection: Chaos.always(), generator: Some(Weighted.choose(&[(1, Resilience.Raised("rare")), (0, Resilience.Raised("never")), (3, Resilience.TimedOut(5))]))}
+  let heavy = Pipeline.execute(&chaotic([Fault.strategy(weighted)], &clock, 0.5d), counted(&calls))
+  let light = Pipeline.execute(&chaotic([Fault.strategy(weighted)], &clock, 0.1d), counted(&calls))
+  let nothing = Fault.Options{..Fault.defaults(), injection: Chaos.always(), generator: Some(Weighted.choose(&[(0, Resilience.Raised("never"))]))}
+  let emptyChoice = Pipeline.execute(&chaotic([Fault.strategy(nothing)], &clock, 0.5d), counted(&calls))
+  let callsSoFar = Sync.count(&calls)
+
+  let seenOutcome: Sync.Cell[Int] = Sync.cell(0)
+  let outcome = Outcome.Options{..Outcome.injecting(Ok(42), Chaos.always()), onInjected: Some(fn(given: Outcome.Injected[Int, Str]) -> () {
+        let _kept = Sync.set(&seenOutcome, match given.outcome { case Ok(value) => value case Err(_) => -1 })
+      }) }
+  let replaced = Pipeline.execute(&chaotic([Outcome.strategy(outcome)], &clock, 0.5d), counted(&Sync.counter(0)))
+
+  let latencyClock = Clock.manual(0)
+  let latencyCalls = Sync.counter(0)
+  let delayed = Pipeline.execute(&chaotic([Latency.strategy(Latency.injecting(250, Chaos.always()))], &latencyClock, 0.5d), counted(&latencyCalls))
+  let generatedLatency = Latency.Options{..Latency.injecting(250, Chaos.always()), generator: Some(fn(_given: Chaos.Arguments) -> Int { 0 })}
+  let _undelayed = Pipeline.execute(&chaotic([Latency.strategy(generatedLatency)], &latencyClock, 0.5d), counted(&latencyCalls))
+  let stopping = Context.create()
+  Context.cancel(&stopping, "stop")
+  let cancelledLatency = Pipeline.executeWith(&chaotic([Latency.strategy(Latency.injecting(250, Chaos.always()))], &latencyClock, 0.5d), stopping, counted(&latencyCalls))
+
+  let behaved = Sync.counter(0)
+  let behavior = Behavior.injecting(fn(_given: Chaos.Arguments) -> Result[(), Resilience.Failure[Str]] {
+      let _counted = Sync.increment(&behaved, 1)
+      Ok(())
+    }, Chaos.always())
+  let withBehavior = Pipeline.execute(&chaotic([Behavior.strategy(behavior)], &clock, 0.5d), counted(&Sync.counter(0)))
+  let failingBehavior = Behavior.injecting(fn(_given: Chaos.Arguments) -> Result[(), Resilience.Failure[Str]] { Err(Resilience.Raised("behavior failed")) }, Chaos.always())
+  let behaviorCalls = Sync.counter(0)
+  let behaviorFailed = Pipeline.execute(&chaotic([Behavior.strategy(failingBehavior)], &clock, 0.5d), counted(&behaviorCalls))
+
+  let invalid = Pipeline.build([
+      Fault.strategy(Fault.Options{..Fault.defaults(), injection: Chaos.atRate(1.5d)}),
+      Outcome.strategy(Outcome.defaults()),
+      Latency.strategy(Latency.Options{..Latency.defaults(), latency: -1}),
+      Behavior.strategy(Behavior.defaults())
+    ])
+  let problems = match invalid { case Err(found) => found.problems case Ok(_) => [] }
+  let checks = Test.suite("Chaos", &[
+      Test.equals("a draw below the rate injects the fault", &injected, &Resilience.raise("injected")),
+      Test.equals("a draw above the rate runs the callback", &skipped, &Ok(1)),
+      Test.equals("a disabled strategy runs the callback", &disabled, &Ok(1)),
+      Test.equals("an enabled generator can turn injection on", &keyedOn, &Resilience.raise("injected")),
+      Test.equals("an enabled generator can turn injection off", &keyedOff, &Ok(1)),
+      Test.equals("a generated rate above one always injects", &clampedRate, &Resilience.raise("injected")),
+      Test.equals("a weighted choice follows the weights upward", &heavy, &Err(Resilience.TimedOut(5))),
+      Test.equals("a weighted choice follows the weights downward", &light, &Resilience.raise("rare")),
+      Test.equals("a choice without positive weights injects nothing", &emptyChoice, &Ok(1)),
+      Test.equals("an injected fault does not run the callback", &callsSoFar, &Ok(4)),
+      Test.equals("an injected outcome replaces the callback's", &replaced, &Ok(42)),
+      Test.equals("onInjected sees the injected outcome", &Sync.get(&seenOutcome), &Ok(42)),
+      Test.equals("injected latency runs the callback afterwards", &delayed, &Ok(1)),
+      Test.equals("injected latency waits on the clock; a zero delay does not", &Clock.sleeps(&latencyClock), &[250]),
+      Test.equals("a fired token ends the delay without running the callback", &cancelledLatency, &Err(Resilience.Cancelled("cancelled: stop"))),
+      Test.equals("latency ran the callback only when not cancelled", &Sync.count(&latencyCalls), &Ok(2)),
+      Test.equals("injected behavior runs before the callback", &(withBehavior, Sync.count(&behaved)), &(Ok(1), Ok(1))),
+      Test.equals("failing behavior answers its failure", &behaviorFailed, &Resilience.raise("behavior failed")),
+      Test.equals("failing behavior skips the callback", &Sync.count(&behaviorCalls), &Ok(0)),
+      Test.equals("every invalid option is reported", &problems, &["ChaosFault: rate must be from 0 to 1", "ChaosFault: a fault or a generator is required", "ChaosOutcome: an outcome or a generator is required", "ChaosLatency: latency must not be negative", "ChaosBehavior: behavior is required"]),
+      Test.that("configured chaos options are valid", Fault.validate(&fault).isEmpty() && Outcome.validate(&outcome).isEmpty() && Latency.validate(&generatedLatency).isEmpty() && Behavior.validate(&behavior).isEmpty()),
+      Test.that("the injection bounds are accepted", Chaos.validate(&Chaos.atRate(0d)).isEmpty() && Chaos.validate(&Chaos.atRate(1d)).isEmpty())
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

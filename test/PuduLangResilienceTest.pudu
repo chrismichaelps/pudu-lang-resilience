@@ -1,0 +1,42 @@
+/** @Test.Root.Suite — outcome helpers and failure descriptions */
+module PuduLangResilienceTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience as Resilience
+
+/// Runs the suite.
+fn main() -> Int {
+  let failures: Array[Resilience.Failure[Str]] = [
+    Resilience.Raised("disk"), Resilience.TimedOut(30), Resilience.BrokenCircuit(5), Resilience.IsolatedCircuit,
+    Resilience.RateLimited(Some(9)), Resilience.RateLimited(None), Resilience.Cancelled("stop"), Resilience.Crashed("boom")
+  ]
+  let succeeded: Resilience.Outcome[Int, Str] = Resilience.succeed(4)
+  let lost: Resilience.Outcome[Int, Str] = Resilience.raise("x")
+  let checks = Test.suite("Resilience", &[
+      Test.equals("succeed holds the value", &succeeded, &Ok(4)),
+      Test.equals("raise holds the callback's error", &Resilience.raise("bad"), &Err(Resilience.Raised("bad"))),
+      Test.equals("lift keeps a value", &Resilience.lift(Ok(2)), &Ok(2)),
+      Test.equals("lift raises an error", &Resilience.lift(Err("e")), &Err(Resilience.Raised("e"))),
+      Test.equals("raised answers only the callback's error", &failures.map(|found: Resilience.Failure[Str]| Resilience.raised(&found)), &[Some("disk"), None, None, None, None, None, None, None]),
+      Test.equals("only cancellation is a cancellation", &failures.map(|found: Resilience.Failure[Str]| Resilience.isCancellation(&found)), &[false, false, false, false, false, false, true, false]),
+      Test.equals("rejections are the strategies' refusals", &failures.map(|found: Resilience.Failure[Str]| Resilience.isRejection(&found)), &[false, true, true, true, true, true, false, false]),
+      Test.equals("every failure is described", &failures.map(|found: Resilience.Failure[Str]| Resilience.describe(&found)), &[
+          "The operation failed: \"disk\"",
+          "The operation did not complete within 30 ms.",
+          "The circuit is open; it may be tried again in 5 ms.",
+          "The circuit is isolated and admits no execution.",
+          "The rate limiter rejected the execution; retry after 9 ms.",
+          "The rate limiter rejected the execution.",
+          "The operation was cancelled: stop",
+          "The operation stopped its thread: boom"
+        ]),
+      Test.equals("a value is summarized", &Resilience.summarize(&succeeded), &"Ok(4)"),
+      Test.equals("a failure is summarized by its description", &Resilience.summarize(&lost), &"The operation failed: \"x\"")
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

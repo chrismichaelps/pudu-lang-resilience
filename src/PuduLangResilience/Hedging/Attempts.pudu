@@ -1,0 +1,95 @@
+/** @Hedging.Attempts.Module — concurrent attempts, their outcomes, and their end */
+module PuduLangResilience.Hedging.Attempts
+
+import Std.Channel as Channel
+import Std.Concurrent.Cancel as Cancel
+import Std.Concurrent as Concurrent
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience as Resilience
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Hedging.Attempts.Attempt — one running execution of a hedged callback */
+export type Attempt[T, E] = {
+  index: Int,
+  context: Context.Context,
+  started: Int,
+  outcome: Shared.Shared[Option[Resilience.Outcome[T, E]]],
+  worker: Option[Concurrent.Task]
+}
+
+/// How long a wait for the next finished attempt sleeps before looking again, in milliseconds.
+const POLL_MILLIS: Int = 1
+
+/// A wait that ends only when an attempt finishes.
+export const FOREVER: Int = -1
+
+/// Starts `callback` on a thread of its own with `context`. When it finishes, its outcome is
+/// stored and `index` is sent to `finished`; a callback that stops its thread finishes as
+/// `Crashed`, and one that cannot be started finishes at once as `Crashed`.
+export fn launch[T, E](index: Int, context: Context.Context, callback: fn(Context.Context) -> Resilience.Outcome[T, E], finished: &Channel.Channel[Int], started: Int) -> Attempt[T, E] {
+  let slot: Shared.Shared[Option[Resilience.Outcome[T, E]]] = Shared.shared(None)
+  let done = *finished
+  let worker = Concurrent.start(fn() -> () {
+      let ran = Concurrent.contain(fn() -> () {
+          let outcome = callback(context)
+          Shared.update(&slot, fn(_held: Option[Resilience.Outcome[T, E]]) -> Option[Resilience.Outcome[T, E]] { Some(outcome) })
+        })
+      if let Err(problem) = ran {
+        Shared.update(&slot, fn(_held: Option[Resilience.Outcome[T, E]]) -> Option[Resilience.Outcome[T, E]] { Some(Err(Resilience.Crashed(show(problem)))) })
+      }
+      let _sent = Channel.send(&done, index)
+    })
+  match worker {
+    case Ok(running) => Attempt{index: index, context: context, started: started, outcome: slot, worker: Some(running)}
+    case Err(problem) => {
+      Shared.update(&slot, fn(_held: Option[Resilience.Outcome[T, E]]) -> Option[Resilience.Outcome[T, E]] { Some(Err(Resilience.Crashed(show(problem)))) })
+      let _sent = Channel.send(&done, index)
+      Attempt{index: index, context: context, started: started, outcome: slot, worker: None}
+    }
+  }
+}
+
+/// The index of the next attempt to finish, or `None` when `wait` milliseconds pass on the clock
+/// first. A `wait` of `FOREVER` waits for as long as it takes.
+export fn next(finished: &Channel.Channel[Int], clock: &Clock.Clock, wait: Int) -> Option[Int] {
+  if wait == FOREVER {
+    return match Channel.receive(finished) {
+      case Ok(Some(index)) => Some(index)
+      case _ => None
+    }
+  }
+  let until = Clock.now(clock) + wait
+  let never = Cancel.token()
+  loop {
+    match Channel.pending(finished) {
+      case Ok(count) => {
+        if count > 0 {
+          return match Channel.receive(finished) {
+            case Ok(Some(index)) => Some(index)
+            case _ => None
+          }
+        }
+      }
+      case Err(_) => { return None }
+    }
+    if Clock.now(clock) >= until { return None }
+    let _slept = Clock.sleep(clock, POLL_MILLIS, &never)
+  }
+}
+
+/// The outcome of a finished attempt.
+export fn outcomeOf[T, E](attempt: &Attempt[T, E]) -> Resilience.Outcome[T, E] {
+  match Shared.current(&attempt.outcome) {
+    case Some(outcome) => outcome
+    case None => Err(Resilience.Crashed("the attempt finished without an outcome"))
+  }
+}
+
+/// Asks every attempt to stop and waits until each thread has ended.
+export fn settle[T, E](attempts: &Array[Attempt[T, E]], why: Str) -> () {
+  for attempt in attempts { Context.cancel(&attempt.context, why) }
+  for attempt in attempts {
+    if let Some(running) = attempt.worker { let _joined = Concurrent.join(&running) }
+  }
+}

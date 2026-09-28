@@ -1,0 +1,42 @@
+/** @Limiter.TokenBucket.Module — permits drawn from a steadily refilled bucket */
+module PuduLangResilience.Limiter.TokenBucket
+
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Domain.Algorithms as Algorithms
+import PuduLangResilience.Limiter.Engine as Engine
+import PuduLangResilience.Limiter as Limiter
+
+/** @Limiter.TokenBucket.Options — the bucket's size, refill, and queue */
+export type Options = {
+  tokenLimit: Int,
+  tokensPerPeriod: Int,
+  replenishmentPeriod: Int,
+  autoReplenishment: Bool,
+  queueLimit: Int,
+  queueOrder: Limiter.QueueOrder,
+  clock: Clock.Clock
+}
+
+/// A full bucket of ten tokens gaining ten every second by itself, with no queue.
+export fn defaults() -> Options {
+  Options{tokenLimit: 10, tokensPerPeriod: 10, replenishmentPeriod: 1000, autoReplenishment: true, queueLimit: 0, queueOrder: Limiter.OldestFirst, clock: Clock.system()}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate(options: &Options) -> Array[Str] {
+  var problems: Array[Str] = []
+  if options.tokenLimit < 1 { problems = problems.push("tokenLimit must be at least 1") }
+  if options.tokensPerPeriod < 1 { problems = problems.push("tokensPerPeriod must be at least 1") }
+  if options.replenishmentPeriod < 1 { problems = problems.push("replenishmentPeriod must be at least 1 ms") }
+  if options.queueLimit < 0 { problems = problems.push("queueLimit must not be negative") }
+  problems
+}
+
+/// A token bucket limiter starting full, or every reason it cannot be made.
+export fn create(options: &Options) -> Result[Limiter.Limiter, Array[Str]] {
+  let problems = validate(options)
+  if !problems.isEmpty() { return Err(problems) }
+  let queueing = Engine.Queueing{permitLimit: options.tokenLimit, queueLimit: options.queueLimit, order: options.queueOrder}
+  let start = Algorithms.Bucket{tokens: options.tokenLimit, stamp: Clock.now(&options.clock)}
+  Ok(Engine.limiter(start, Algorithms.tokenBucket(options.tokenLimit, options.tokensPerPeriod, options.replenishmentPeriod, options.autoReplenishment), &queueing, options.clock))
+}

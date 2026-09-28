@@ -1,0 +1,65 @@
+/** @Resilience.Fallback.Strategy — substitutes an outcome for a handled one */
+module PuduLangResilience.Fallback
+
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Resilience.Fallback.Options — what to handle and what to answer instead */
+export type Options[T, E] = {
+  name: Option[Str],
+  shouldHandle: Predicate.Predicate[T, E],
+  action: Option[fn(Predicate.Arguments[T, E]) -> Resilience.Outcome[T, E]],
+  onFallback: Option[fn(Predicate.Arguments[T, E]) -> ()]
+}
+
+/// Handles every failure except a cancellation; the action must still be given.
+export fn defaults[T, E]() -> Options[T, E] {
+  Options{name: None, shouldHandle: Predicate.failures(), action: None, onFallback: None}
+}
+
+/// Answers `value` in place of every failure except a cancellation.
+export fn withValue[T, E](value: T) -> Options[T, E] {
+  Options{..defaults(), action: Some(fn(_given: Predicate.Arguments[T, E]) -> Resilience.Outcome[T, E] { Ok(value) })}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate[T, E](options: &Options[T, E]) -> Array[Str] {
+  match options.action {
+    case Some(_) => []
+    case None => ["action is required"]
+  }
+}
+
+/// A fallback strategy following the options.
+export fn strategy[T, E](options: Options[T, E]) -> Strategy.Strategy[T, E] {
+  Strategy.Strategy {
+    name: options.name,
+    kind: "Fallback",
+    summary: "fallback",
+    problems: validate(&options),
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      execute(&options, &runtime, context, callback)
+    }
+  }
+}
+
+/// Runs the callback and, when the predicate handles its outcome, answers the action's outcome
+/// for it instead.
+fn execute[T, E](options: &Options[T, E], runtime: &Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+  let outcome = callback(context)
+  let given = Predicate.arguments(outcome, context, 0)
+  if !(options.shouldHandle)(given) { return outcome }
+  match options.action {
+    case Some(substitute) => {
+      Telemetry.report(&runtime.telemetry, &context, Events.ON_FALLBACK, Telemetry.Warning, Some(Resilience.summarize(&outcome)), Telemetry.FellBack)
+      if let Some(notify) = options.onFallback { notify(given) }
+      substitute(given)
+    }
+    case None => outcome
+  }
+}

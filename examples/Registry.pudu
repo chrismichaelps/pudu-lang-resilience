@@ -1,0 +1,31 @@
+/** @Examples.Registry.Program — named pipelines shared across callers */
+module Registry
+
+import Std.Io as Io
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Registry as Registry
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Timeout as Timeout
+
+/// Registers one builder per dependency and runs a call through the one it names.
+fn main() -> Int {
+  let registry: Registry.Registry[Int, Str] = Registry.create()
+  let _payments = Registry.tryAddBuilder(&registry, "payments", fn(_context: Registry.BuilderContext) -> Array[Strategy.Strategy[Int, Str]] {
+      [Retry.strategy(Retry.Options{..Retry.defaults(), delay: 10}), Timeout.strategy(Timeout.after(2000))]
+    })
+  match Registry.get(&registry, "payments") {
+    case Ok(pipeline) => {
+      let outcome = Pipeline.execute(&pipeline, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Ok(201) })
+      let described = Pipeline.describe(&pipeline)
+      let _shown = Io.writeLine("payments answered " + Resilience.summarize(&outcome) + " through " + described.strategies.map(|layer: Pipeline.Described| layer.kind).join(", "))
+      0
+    }
+    case Err(problem) => {
+      let _said = Io.writeErrorLine(Registry.explain(&problem))
+      1
+    }
+  }
+}

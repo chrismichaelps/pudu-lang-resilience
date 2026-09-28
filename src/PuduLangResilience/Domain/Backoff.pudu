@@ -1,0 +1,84 @@
+/** @Domain.Backoff.Module — delays between retries, with and without jitter */
+module PuduLangResilience.Domain.Backoff
+
+import Std.Math.Float as Float
+import Std.Math as Math
+import Std.Option as Option
+import PuduLangResilience.Utils.Numeric as Numeric
+
+/** @Domain.Backoff.Shape — how the delay grows with each retry */
+export type Shape = Constant | Linear | Exponential
+
+/** @Domain.Backoff.Plan — the inputs every delay is computed from */
+export type Plan = { shape: Shape, delay: Int, maxDelay: Option[Int], useJitter: Bool }
+
+/// The share of a constant or linear delay that jitter spreads over, centred on the delay.
+const JITTER_SPREAD: Float = 0.5
+
+/// Smooths the first delays of the exponential jitter curve.
+const CURVE_SMOOTHING: Float = 4.0
+
+/// Scales the exponential jitter curve so its medians fall near whole multiples of the delay.
+const CURVE_SCALE: Float = 0.7142857142857143
+
+/// The delay before retry `attempt`, counting from 0, and the jitter state for the next one.
+/// `state` starts at 0.0 for a run of retries; `draw` is a uniform number from 0 up to 1.
+export fn next(plan: &Plan, attempt: Int, state: Float, draw: Float) -> (Int, Float) {
+  if plan.delay <= 0 { return (0, state) }
+  let raw = if plan.useJitter { jittered(plan, attempt, state, draw) } else { (steady(plan, attempt), state) }
+  (capped(plan, raw[0]), raw[1])
+}
+
+/// The delay before retry `attempt` without jitter.
+export fn steady(plan: &Plan, attempt: Int) -> Int {
+  match plan.shape {
+    case Constant => plan.delay
+    case Linear => Numeric.multiply(Numeric.add(attempt, 1), plan.delay)
+    case Exponential => doubled(plan.delay, attempt)
+  }
+}
+
+/// `value` doubled `times` times, saturating at `Numeric.LARGEST`.
+fn doubled(value: Int, times: Int) -> Int {
+  var held = value
+  var step = 0
+  while step < times {
+    if held == Numeric.LARGEST { return held }
+    held = Numeric.multiply(held, 2)
+    step = step + 1
+  }
+  held
+}
+
+/// A delay no longer than the plan's ceiling, when it has one.
+fn capped(plan: &Plan, delay: Int) -> Int {
+  match plan.maxDelay {
+    case Some(ceiling) => Math.min(delay, ceiling)
+    case None => delay
+  }
+}
+
+/// The jittered delay and the next jitter state.
+fn jittered(plan: &Plan, attempt: Int, state: Float, draw: Float) -> (Int, Float) {
+  match plan.shape {
+    case Exponential => decorrelated(plan.delay, attempt, state, draw)
+    case _ => (spread(steady(plan, attempt), draw), state)
+  }
+}
+
+/// A delay moved by up to a quarter of itself either way.
+fn spread(delay: Int, draw: Float) -> Int {
+  let base = Numeric.toFloat(delay)
+  Numeric.toInt(base + base * JITTER_SPREAD * draw - base * JITTER_SPREAD / 2.0)
+}
+
+/// The decorrelated exponential curve: `2^t * tanh(sqrt(4t))` at `t = attempt + draw`, less the
+/// curve's previous value, scaled by the base delay.
+fn decorrelated(delay: Int, attempt: Int, state: Float, draw: Float) -> (Int, Float) {
+  let t = Numeric.toFloat(attempt) + draw
+  let growth = Option.unwrapOr(Float.powf(2.0, t), 0.0 / 0.0)
+  let root = Option.unwrapOr(Float.sqrt(CURVE_SMOOTHING * t), 0.0)
+  let curve = growth * Float.tanh(root)
+  if !Float.isFinite(curve) { return (Numeric.LARGEST, curve) }
+  (Numeric.toInt((curve - state) * CURVE_SCALE * Numeric.toFloat(delay)), curve)
+}

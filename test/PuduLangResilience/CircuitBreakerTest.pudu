@@ -1,0 +1,155 @@
+/** @Test.CircuitBreaker.Suite — opening, probing, closing, and manual control */
+module PuduLangResilience.CircuitBreakerTest
+
+import Std.Io as Io
+import Std.Result as Result
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.CircuitBreaker as CircuitBreaker
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+import PuduLangResilience.Telemetry as Telemetry
+
+/// Opens at half of at least two executions in one second, for half a second.
+fn sensitive() -> CircuitBreaker.Options[Int, Str] {
+  CircuitBreaker.Options{..CircuitBreaker.defaults(), failureRatio: 0.5d, minimumThroughput: 2, samplingDuration: 1000, breakDuration: 500}
+}
+
+/// A pipeline of one circuit breaker on a manual clock, recording event names.
+fn breaking(options: CircuitBreaker.Options[Int, Str], clock: &Clock.Manual, events: &Sync.Cell[Array[Str]]) -> Pipeline.Pipeline[Int, Str] {
+  let sink = *events
+  let settings = Pipeline.Options{..Pipeline.defaults(), clock: Clock.ofManual(clock), listeners: [fn(event: Telemetry.Event) -> () {
+        if event.name != "PipelineExecuting" && event.name != "PipelineExecuted" {
+          let held = match Sync.get(&sink) { case Ok(list) => list case Err(_) => [] }
+          let _kept = Sync.set(&sink, held.push(event.name))
+        }
+      }] }
+  match Pipeline.buildWith(&settings, [CircuitBreaker.strategy(options)]) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// A callback answering `outcome` and counting its calls.
+fn answering(outcome: Resilience.Outcome[Int, Str], calls: &Sync.Counter) -> fn(Context.Context) -> Resilience.Outcome[Int, Str] {
+  let counter = *calls
+  fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+    let _counted = Sync.increment(&counter, 1)
+    outcome
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let events: Sync.Cell[Array[Str]] = Sync.cell([])
+  let clock = Clock.manual(0)
+  let calls = Sync.counter(0)
+  let provider = CircuitBreaker.stateProvider()
+  let beforeAttached = CircuitBreaker.state(&provider)
+  let pipeline = breaking(CircuitBreaker.Options{..sensitive(), stateProvider: Some(provider)}, &clock, &events)
+  let fail = answering(Resilience.raise("down"), &calls)
+  let succeed = answering(Ok(1), &calls)
+  let first = Pipeline.execute(&pipeline, fail)
+  let stillClosed = CircuitBreaker.state(&provider)
+  let second = Pipeline.execute(&pipeline, fail)
+  let openState = CircuitBreaker.state(&provider)
+  let lastFailure = CircuitBreaker.lastHandled(&provider)
+  Clock.advance(&clock, 200)
+  let rejected = Pipeline.execute(&pipeline, succeed)
+  let callsWhileOpen = Sync.count(&calls)
+  Clock.advance(&clock, 300)
+  let probe = Pipeline.execute(&pipeline, succeed)
+  let afterProbe = CircuitBreaker.state(&provider)
+  let clearedFailure = CircuitBreaker.lastHandled(&provider)
+
+  let reopenClock = Clock.manual(0)
+  let attempts: Sync.Cell[Array[Int]] = Sync.cell([])
+  let generated = CircuitBreaker.Options{..sensitive(), breakDurationGenerator: Some(fn(given: CircuitBreaker.BreakArguments) -> Int {
+        let held = match Sync.get(&attempts) { case Ok(list) => list case Err(_) => [] }
+        let _kept = Sync.set(&attempts, held.push(given.halfOpenAttempts))
+        1000 * (given.halfOpenAttempts + 1)
+      }) }
+  let reopening = breaking(generated, &reopenClock, &Sync.cell([]))
+  let reopenCalls = Sync.counter(0)
+  let _a = Pipeline.execute(&reopening, answering(Resilience.raise("down"), &reopenCalls))
+  let _b = Pipeline.execute(&reopening, answering(Resilience.raise("down"), &reopenCalls))
+  Clock.advance(&reopenClock, 1000)
+  let failedProbe = Pipeline.execute(&reopening, answering(Resilience.raise("still down"), &reopenCalls))
+  Clock.advance(&reopenClock, 1999)
+  let beforeLongerBreak = Pipeline.execute(&reopening, answering(Ok(1), &reopenCalls))
+
+  let windowClock = Clock.manual(0)
+  let windowed = breaking(sensitive(), &windowClock, &Sync.cell([]))
+  let windowCalls = Sync.counter(0)
+  let _old = Pipeline.execute(&windowed, answering(Resilience.raise("down"), &windowCalls))
+  Clock.advance(&windowClock, 1000)
+  let _fresh = Pipeline.execute(&windowed, answering(Resilience.raise("down"), &windowCalls))
+  let afterExpiry = Pipeline.execute(&windowed, answering(Ok(3), &windowCalls))
+
+  let cancelClock = Clock.manual(0)
+  let cancelling = breaking(sensitive(), &cancelClock, &Sync.cell([]))
+  for _round in [1, 2, 3] {
+    let _cancelled = Pipeline.execute(&cancelling, answering(Err(Resilience.Cancelled("stop")), &Sync.counter(0)))
+  }
+  let afterCancellations = Pipeline.execute(&cancelling, answering(Ok(4), &Sync.counter(0)))
+
+  let control = CircuitBreaker.manualControl()
+  let manualEvents: Sync.Cell[Array[Str]] = Sync.cell([])
+  let manualOpened: Sync.Cell[Array[Bool]] = Sync.cell([])
+  let controlled = breaking(CircuitBreaker.Options{..sensitive(), manualControl: Some(control), onOpened: Some(fn(opening: CircuitBreaker.Opening[Int, Str]) -> () {
+          let _kept = Sync.set(&manualOpened, [opening.manual, opening.outcome == None])
+        }) }, &Clock.manual(0), &manualEvents)
+  CircuitBreaker.isolate(&control)
+  let isolated = Pipeline.execute(&controlled, answering(Ok(1), &Sync.counter(0)))
+  let isolatedFlag = CircuitBreaker.isIsolated(&control)
+  CircuitBreaker.close(&control)
+  let reopened = Pipeline.execute(&controlled, answering(Ok(5), &Sync.counter(0)))
+  CircuitBreaker.close(&control)
+
+  let preIsolated = CircuitBreaker.manualControl()
+  CircuitBreaker.isolate(&preIsolated)
+  let lateProvider = CircuitBreaker.stateProvider()
+  let _late = breaking(CircuitBreaker.Options{..sensitive(), manualControl: Some(preIsolated), stateProvider: Some(lateProvider)}, &Clock.manual(0), &Sync.cell([]))
+
+  let shared = CircuitBreaker.stateProvider()
+  let _owner = CircuitBreaker.strategy(CircuitBreaker.Options{..sensitive(), stateProvider: Some(shared)})
+  let reused = Pipeline.build([CircuitBreaker.strategy(CircuitBreaker.Options{..sensitive(), stateProvider: Some(shared)})])
+  let invalid = Pipeline.build([CircuitBreaker.strategy(CircuitBreaker.Options{..sensitive(), failureRatio: 1.5d, minimumThroughput: 1, samplingDuration: 499, breakDuration: 86400001})])
+  let problems = match invalid { case Err(found) => found.problems case Ok(_) => [] }
+
+  let checks = Test.suite("CircuitBreaker", &[
+      Test.equals("a provider reads nothing before it is attached", &beforeAttached, &None),
+      Test.equals("a failure below the threshold passes through", &first, &Resilience.raise("down")),
+      Test.equals("the circuit stays closed below the minimum throughput", &stillClosed, &Some(CircuitBreaker.Closed)),
+      Test.equals("the failure that meets the threshold passes through", &second, &Resilience.raise("down")),
+      Test.equals("the circuit opens at the threshold", &openState, &Some(CircuitBreaker.Open)),
+      Test.equals("the provider reads the last handled outcome", &lastFailure, &Some("The operation failed: \"down\"")),
+      Test.equals("an open circuit rejects with the time left", &rejected, &Err(Resilience.BrokenCircuit(300))),
+      Test.equals("an open circuit does not run the callback", &callsWhileOpen, &Ok(2)),
+      Test.equals("after the break a probe runs", &probe, &Ok(1)),
+      Test.equals("a successful probe closes the circuit", &afterProbe, &Some(CircuitBreaker.Closed)),
+      Test.equals("a closed circuit forgets its last failure", &clearedFailure, &None),
+      Test.equals("transitions are reported", &Sync.get(&events), &Ok(["OnCircuitOpened", "OnCircuitHalfOpened", "OnCircuitClosed"])),
+      Test.equals("a failed probe passes its failure through", &failedProbe, &Resilience.raise("still down")),
+      Test.equals("the break generator sees the half-open attempts", &Sync.get(&attempts), &Ok([0, 1])),
+      Test.equals("a failed probe reopens for the generated duration", &beforeLongerBreak, &Err(Resilience.BrokenCircuit(1))),
+      Test.equals("failures older than the sampling period are not counted", &afterExpiry, &Ok(3)),
+      Test.equals("cancellations are not handled and never open the circuit", &afterCancellations, &Ok(4)),
+      Test.equals("an isolated circuit refuses every execution", &isolated, &Err(Resilience.IsolatedCircuit)),
+      Test.that("the control reports isolation", isolatedFlag),
+      Test.equals("onOpened sees a manual opening without an outcome", &Sync.get(&manualOpened), &Ok([true, true])),
+      Test.equals("closing by hand admits executions again", &reopened, &Ok(5)),
+      Test.equals("closing an already closed circuit reports nothing", &Sync.get(&manualEvents), &Ok(["OnCircuitOpened", "OnCircuitClosed"])),
+      Test.equals("a circuit attached to an isolated control starts isolated", &CircuitBreaker.state(&lateProvider), &Some(CircuitBreaker.Isolated)),
+      Test.that("a state provider serves one circuit only", Result.isErr(&reused)),
+      Test.equals("every invalid option is reported", &problems, &["CircuitBreaker: failureRatio must be from 0 to 1", "CircuitBreaker: minimumThroughput must be at least 2", "CircuitBreaker: samplingDuration must be from 500 to 86400000 ms", "CircuitBreaker: breakDuration must be from 500 to 86400000 ms"]),
+      Test.that("the bounds themselves are accepted", CircuitBreaker.validate(&CircuitBreaker.Options{..sensitive(), failureRatio: 0d, samplingDuration: 500, breakDuration: 86400000}).isEmpty() && CircuitBreaker.validate(&CircuitBreaker.Options{..sensitive(), failureRatio: 1d}).isEmpty())
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

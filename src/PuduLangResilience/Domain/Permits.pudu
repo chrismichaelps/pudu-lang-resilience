@@ -1,0 +1,141 @@
+/** @Domain.Permits.Module — permit accounting and the wait queue */
+module PuduLangResilience.Domain.Permits
+
+import Std.List as List
+import PuduLangResilience.Utils.Numeric as Numeric
+
+/** @Domain.Permits.Algorithm — how one kind of limiter counts permits */
+export type Algorithm[S] = {
+  refresh: fn(S, Int) -> S,
+  available: fn(S) -> Int,
+  take: fn(S, Int) -> S,
+  giveBack: fn(S, Int) -> S,
+  retryAfter: fn(S, Int, Int) -> Option[Int],
+  replenish: fn(S) -> (S, Bool)
+}
+
+/** @Domain.Permits.Order — which waiter is served first */
+export type Order = Oldest | Newest
+
+/** @Domain.Permits.Waiter — one queued request */
+export type Waiter = { ticket: Int, permits: Int }
+
+/** @Domain.Permits.Book — a limiter's counts and queue */
+export type Book[S] = {
+  held: S,
+  waiters: Array[Waiter],
+  evicted: Array[Int],
+  nextTicket: Int,
+  failed: Int,
+  succeeded: Int,
+  permitLimit: Int,
+  queueLimit: Int,
+  order: Order
+}
+
+/** @Domain.Permits.Decision — the answer to a new request */
+export type Decision = Grant | Deny(Option[Int]) | Queue(Int)
+
+/** @Domain.Permits.Turn — the answer to a waiter asking again */
+export type Turn = Taken | Evicted | Waiting
+
+/// A book with no waiters over the algorithm state `held`.
+export fn open[S](held: S, permitLimit: Int, queueLimit: Int, order: Order) -> Book[S] {
+  Book{held: held, waiters: [], evicted: [], nextTicket: 1, failed: 0, succeeded: 0, permitLimit: permitLimit, queueLimit: queueLimit, order: order}
+}
+
+/// The book at `now` after a request for `permits`. The request is granted when the permits are
+/// available and no waiter comes first; otherwise it joins the queue when `mayQueue` and the
+/// queue has room, evicting the oldest waiters when newest requests are served first; otherwise
+/// it is denied. A request for more than the permit limit is always denied, and a request for no
+/// permits is granted while any permit is available.
+export fn request[S](book: &Book[S], algorithm: &Algorithm[S], now: Int, permits: Int, mayQueue: Bool) -> (Book[S], Decision) {
+  let current = Book{..*book, held: (algorithm.refresh)(book.held, now)}
+  let free = (algorithm.available)(current.held)
+  if permits < 0 || permits > current.permitLimit { return deny(&current, None) }
+  if permits == 0 { return if free > 0 { (current, Grant) } else { deny(&current, (algorithm.retryAfter)(current.held, now, 1)) } }
+  let ahead = !current.waiters.isEmpty() && current.order == Oldest
+  if free >= permits && !ahead { return (take(&current, algorithm, permits), Grant) }
+  let retry = (algorithm.retryAfter)(current.held, now, permits)
+  if !mayQueue || permits > current.queueLimit { return deny(&current, retry) }
+  var queue = current.waiters
+  var evicted = current.evicted
+  var failed = current.failed
+  if current.order == Newest {
+    while queuedIn(&queue) + permits > current.queueLimit {
+      evicted = evicted.push(queue[0].ticket)
+      failed = failed + 1
+      queue = queue.slice(1, queue.length())
+    }
+  } else if queuedIn(&queue) + permits > current.queueLimit {
+    return deny(&current, retry)
+  }
+  let ticket = current.nextTicket
+  let joined = Book{..current, waiters: queue.push(Waiter{ticket: ticket, permits: permits}), evicted: evicted, failed: failed, nextTicket: ticket + 1}
+  (joined, Queue(ticket))
+}
+
+/// The book at `now` after the waiter holding `ticket` asks again. It takes its permits when it
+/// is next in order and they are available.
+export fn poll[S](book: &Book[S], algorithm: &Algorithm[S], now: Int, ticket: Int) -> (Book[S], Turn) {
+  if List.contains(&book.evicted, ticket) {
+    return (Book{..*book, evicted: book.evicted.filter(|held: Int| held != ticket)}, Evicted)
+  }
+  let current = Book{..*book, held: (algorithm.refresh)(book.held, now)}
+  let next = match current.order {
+    case Oldest => List.first(&current.waiters)
+    case Newest => List.last(&current.waiters)
+  }
+  match next {
+    case Some(waiter) => {
+      if waiter.ticket == ticket && (algorithm.available)(current.held) >= waiter.permits {
+        let served = Book{..current, waiters: current.waiters.filter(|held: Waiter| held.ticket != ticket)}
+        (take(&served, algorithm, waiter.permits), Taken)
+      } else {
+        (current, Waiting)
+      }
+    }
+    case None => (current, Waiting)
+  }
+}
+
+/// The book without the waiter holding `ticket`, counted as failed.
+export fn withdraw[S](book: &Book[S], ticket: Int) -> Book[S] {
+  Book{..*book, waiters: book.waiters.filter(|held: Waiter| held.ticket != ticket), evicted: book.evicted.filter(|held: Int| held != ticket), failed: book.failed + 1}
+}
+
+/// The book with `permits` handed back.
+export fn giveBack[S](book: &Book[S], algorithm: &Algorithm[S], permits: Int) -> Book[S] {
+  Book{..*book, held: (algorithm.giveBack)(book.held, permits)}
+}
+
+/// The book after one replenishment by hand, and whether the algorithm allows it.
+export fn replenish[S](book: &Book[S], algorithm: &Algorithm[S]) -> (Book[S], Bool) {
+  let next = (algorithm.replenish)(book.held)
+  (Book{..*book, held: next[0]}, next[1])
+}
+
+/// The permits available at `now`.
+export fn available[S](book: &Book[S], algorithm: &Algorithm[S], now: Int) -> Int {
+  (algorithm.available)((algorithm.refresh)(book.held, now))
+}
+
+/// The permits all waiters are asking for.
+export fn queued[S](book: &Book[S]) -> Int { queuedIn(&book.waiters) }
+
+/// The permits the given waiters are asking for.
+fn queuedIn(waiters: &Array[Waiter]) -> Int {
+  var total = 0
+  for waiter in waiters { total = Numeric.add(total, waiter.permits) }
+  total
+}
+
+/// The book with `permits` taken and the grant counted.
+fn take[S](book: &Book[S], algorithm: &Algorithm[S], permits: Int) -> Book[S] {
+  Book{..*book, held: (algorithm.take)(book.held, permits), succeeded: book.succeeded + 1}
+}
+
+/// The book with a denial counted, and the denial.
+fn deny[S](book: &Book[S], retryAfter: Option[Int]) -> (Book[S], Decision) {
+  (Book{..*book, failed: book.failed + 1}, Deny(retryAfter))
+}

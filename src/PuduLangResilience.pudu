@@ -1,0 +1,81 @@
+/** @Resilience.Root.Vocabulary — outcomes and failures of guarded executions */
+module PuduLangResilience
+
+import PuduLangResilience.Constants.Messages as Messages
+import PuduLangResilience.Utils.Template as Template
+
+/** @Resilience.Root.Failure — why a guarded execution produced no value */
+export type Failure[E]
+  = Raised(E)
+  | TimedOut(Int)
+  | BrokenCircuit(Int)
+  | IsolatedCircuit
+  | RateLimited(Option[Int])
+  | Cancelled(Str)
+  | Crashed(Str)
+
+/** @Resilience.Root.Outcome — the value or failure of one execution */
+export type Outcome[T, E] = Result[T, Failure[E]]
+
+/// An outcome holding a value.
+export fn succeed[T, E](value: T) -> Outcome[T, E] { Ok(value) }
+
+/// An outcome holding the callback's own error.
+export fn raise[T, E](problem: E) -> Outcome[T, E] { Err(Raised(problem)) }
+
+/// The outcome of a callback that answers a plain `Result`.
+export fn lift[T, E](result: Result[T, E]) -> Outcome[T, E] {
+  match result {
+    case Ok(value) => Ok(value)
+    case Err(problem) => Err(Raised(problem))
+  }
+}
+
+/// The callback's own error, when the failure is one.
+export fn raised[E](failure: &Failure[E]) -> Option[E] {
+  match failure {
+    case Raised(problem) => Some(problem)
+    case _ => None
+  }
+}
+
+/// Whether the failure is a cancellation.
+export fn isCancellation[E](failure: &Failure[E]) -> Bool {
+  match failure {
+    case Cancelled(_) => true
+    case _ => false
+  }
+}
+
+/// Whether the failure is a rejection by a strategy rather than the callback's own error.
+export fn isRejection[E](failure: &Failure[E]) -> Bool {
+  match failure {
+    case TimedOut(_) => true
+    case BrokenCircuit(_) => true
+    case IsolatedCircuit => true
+    case RateLimited(_) => true
+    case _ => false
+  }
+}
+
+/// One sentence saying what went wrong.
+export fn describe[E](failure: &Failure[E]) -> Str {
+  match failure {
+    case Raised(problem) => Template.fill(Messages.RAISED, &[show(problem)])
+    case TimedOut(millis) => Template.fill(Messages.TIMED_OUT, &[show(millis)])
+    case BrokenCircuit(millis) => Template.fill(Messages.BROKEN_CIRCUIT, &[show(millis)])
+    case IsolatedCircuit => Messages.ISOLATED_CIRCUIT
+    case RateLimited(Some(millis)) => Template.fill(Messages.RATE_LIMITED_AFTER, &[show(millis)])
+    case RateLimited(None) => Messages.RATE_LIMITED
+    case Cancelled(reason) => Template.fill(Messages.CANCELLED, &[reason])
+    case Crashed(reason) => Template.fill(Messages.CRASHED, &[reason])
+  }
+}
+
+/// One line naming an outcome, for telemetry.
+export fn summarize[T, E](outcome: &Outcome[T, E]) -> Str {
+  match outcome {
+    case Ok(value) => Template.fill(Messages.SUCCEEDED, &[show(value)])
+    case Err(failure) => describe(&failure)
+  }
+}
