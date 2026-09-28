@@ -1,0 +1,44 @@
+/** @Limiter.SlidingWindow.Module — at most N permits in any moving window */
+module PuduLangResilience.Limiter.SlidingWindow
+
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Domain.Algorithms as Algorithms
+import PuduLangResilience.Limiter.Engine as Engine
+import PuduLangResilience.Limiter as Limiter
+
+/** @Limiter.SlidingWindow.Options — permits per window, its segments, and the queue */
+export type Options = {
+  permitLimit: Int,
+  window: Int,
+  segmentsPerWindow: Int,
+  autoReplenishment: Bool,
+  queueLimit: Int,
+  queueOrder: Limiter.QueueOrder,
+  clock: Clock.Clock
+}
+
+/// A hundred permits in any second, counted in ten segments, with no queue.
+export fn defaults() -> Options {
+  Options{permitLimit: 100, window: 1000, segmentsPerWindow: 10, autoReplenishment: true, queueLimit: 0, queueOrder: Limiter.OldestFirst, clock: Clock.system()}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate(options: &Options) -> Array[Str] {
+  var problems: Array[Str] = []
+  if options.permitLimit < 1 { problems = problems.push("permitLimit must be at least 1") }
+  if options.segmentsPerWindow < 1 { problems = problems.push("segmentsPerWindow must be at least 1") }
+  if options.window < 1 || options.window < options.segmentsPerWindow { problems = problems.push("window must be at least 1 ms for each segment") }
+  if options.queueLimit < 0 { problems = problems.push("queueLimit must not be negative") }
+  problems
+}
+
+/// A sliding window limiter whose first segment starts now, or every reason it cannot be made.
+export fn create(options: &Options) -> Result[Limiter.Limiter, Array[Str]] {
+  let problems = validate(options)
+  if !problems.isEmpty() { return Err(problems) }
+  let queueing = Engine.Queueing{permitLimit: options.permitLimit, queueLimit: options.queueLimit, order: options.queueOrder}
+  var counts: Array[Int] = []
+  while counts.length() < options.segmentsPerWindow { counts = counts.push(0) }
+  let start = Algorithms.Segments{counts: counts, start: Clock.now(&options.clock)}
+  Ok(Engine.limiter(start, Algorithms.slidingWindow(options.permitLimit, options.window, options.segmentsPerWindow, options.autoReplenishment), &queueing, options.clock))
+}

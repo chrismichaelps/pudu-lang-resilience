@@ -1,0 +1,178 @@
+/** @Test.Limiter.Suite — real limiters across threads and manual time */
+module PuduLangResilience.Limiter.LimiterTest
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Concurrent as Concurrent
+import Std.Io as Io
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Limiter.Concurrency as Concurrency
+import PuduLangResilience.Limiter.FixedWindow as FixedWindow
+import PuduLangResilience.Limiter as Limiter
+import PuduLangResilience.Limiter.Partitioned as Partitioned
+import PuduLangResilience.Limiter.SlidingWindow as SlidingWindow
+import PuduLangResilience.Limiter.TokenBucket as TokenBucket
+
+/// The limiter the options make; stops the suite when they are refused.
+fn made(result: Result[Limiter.Limiter, Array[Str]]) -> Limiter.Limiter {
+  match result {
+    case Ok(limiter) => limiter
+    case Err(problems) => panic(problems.join("; "))
+  }
+}
+
+/// Waits up to two seconds for `count` permits to be queued; whether they were.
+fn queuedAtLeast(limiter: &Limiter.Limiter, count: Int) -> Bool {
+  var waited = 0
+  while waited < 2000 {
+    if Limiter.statistics(limiter).queued >= count { return true }
+    let _slept = Concurrent.sleep(2)
+    waited = waited + 2
+  }
+  false
+}
+
+/// Starts a thread that acquires one permit and stores the grant.
+fn contend(limiter: &Limiter.Limiter, token: &Cancel.Token, into: &Sync.Cell[Option[Limiter.Grant]]) -> Concurrent.Task {
+  let target = *limiter
+  let stop = *token
+  let slot = *into
+  match Concurrent.start(fn() -> () {
+      let lease = Limiter.acquire(&target, 1, &stop)
+      let _kept = Sync.set(&slot, Some(lease.grant))
+      Limiter.release(&lease)
+    }) {
+    case Ok(started) => started
+    case Err(problem) => panic(show(problem))
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let single = made(Concurrency.create(&Concurrency.Options{..Concurrency.defaults(), permitLimit: 1, queueLimit: 1}))
+  let held = Limiter.acquire(&single, 1, &Cancel.token())
+  let waiterGrant: Sync.Cell[Option[Limiter.Grant]] = Sync.cell(None)
+  let waiter = contend(&single, &Cancel.token(), &waiterGrant)
+  let queuedSeen = queuedAtLeast(&single, 1)
+  let overflow = Limiter.acquire(&single, 1, &Cancel.token())
+  Limiter.release(&held)
+  Limiter.release(&held)
+  let _joined = Concurrent.join(&waiter)
+  let afterRelease = Limiter.statistics(&single)
+
+  let newest = made(Concurrency.create(&Concurrency.Options{..Concurrency.defaults(), permitLimit: 1, queueLimit: 1, queueOrder: Limiter.NewestFirst}))
+  let newestHeld = Limiter.acquire(&newest, 1, &Cancel.token())
+  let evictedGrant: Sync.Cell[Option[Limiter.Grant]] = Sync.cell(None)
+  let evictedTask = contend(&newest, &Cancel.token(), &evictedGrant)
+  let _firstQueued = queuedAtLeast(&newest, 1)
+  let newestGrant: Sync.Cell[Option[Limiter.Grant]] = Sync.cell(None)
+  let newestTask = contend(&newest, &Cancel.token(), &newestGrant)
+  let _evictedDone = Concurrent.join(&evictedTask)
+  Limiter.release(&newestHeld)
+  let _newestDone = Concurrent.join(&newestTask)
+
+  let cancelling = made(Concurrency.create(&Concurrency.Options{..Concurrency.defaults(), permitLimit: 1, queueLimit: 5}))
+  let blocker = Limiter.acquire(&cancelling, 1, &Cancel.token())
+  let stop = Cancel.token()
+  let cancelledGrant: Sync.Cell[Option[Limiter.Grant]] = Sync.cell(None)
+  let cancelledTask = contend(&cancelling, &stop, &cancelledGrant)
+  let _cancelQueued = queuedAtLeast(&cancelling, 1)
+  let _fired = Cancel.cancel(&stop, "gave up")
+  let _cancelDone = Concurrent.join(&cancelledTask)
+  let afterCancel = Limiter.statistics(&cancelling)
+  Limiter.release(&blocker)
+  let alreadyStopped = Cancel.token()
+  let _stoppedFirst = Cancel.cancel(&alreadyStopped, "early")
+  let stoppedBefore = Limiter.acquire(&cancelling, 1, &alreadyStopped)
+
+  let clock = Clock.manual(0)
+  let bucket = made(TokenBucket.create(&TokenBucket.Options{..TokenBucket.defaults(), tokenLimit: 2, tokensPerPeriod: 1, replenishmentPeriod: 100, queueLimit: 1, clock: Clock.ofManual(&clock)}))
+  let b1 = Limiter.attempt(&bucket, 1)
+  let b2 = Limiter.attempt(&bucket, 1)
+  let b3 = Limiter.attempt(&bucket, 1)
+  let queuedWait = Limiter.acquire(&bucket, 1, &Cancel.token())
+  let bucketSleeps = Clock.sleeps(&clock).length()
+  let manualBucket = made(TokenBucket.create(&TokenBucket.Options{..TokenBucket.defaults(), tokenLimit: 1, tokensPerPeriod: 1, autoReplenishment: false, clock: Clock.ofManual(&clock)}))
+  let _m1 = Limiter.attempt(&manualBucket, 1)
+  Clock.advance(&clock, 100000)
+  let stillDry = Limiter.attempt(&manualBucket, 1)
+  let replenished = Limiter.replenish(&manualBucket)
+  let afterReplenish = Limiter.attempt(&manualBucket, 1)
+
+  let windowClock = Clock.manual(0)
+  let window = made(FixedWindow.create(&FixedWindow.Options{..FixedWindow.defaults(), permitLimit: 2, window: 1000, clock: Clock.ofManual(&windowClock)}))
+  let _w1 = Limiter.attempt(&window, 2)
+  Clock.advance(&windowClock, 250)
+  let windowDenied = Limiter.attempt(&window, 1)
+  Clock.advance(&windowClock, 750)
+  let windowAgain = Limiter.attempt(&window, 1)
+
+  let slideClock = Clock.manual(0)
+  let sliding = made(SlidingWindow.create(&SlidingWindow.Options{..SlidingWindow.defaults(), permitLimit: 2, window: 1000, segmentsPerWindow: 2, clock: Clock.ofManual(&slideClock)}))
+  let _s1 = Limiter.attempt(&sliding, 1)
+  Clock.advance(&slideClock, 600)
+  let _s2 = Limiter.attempt(&sliding, 1)
+  let slideDenied = Limiter.attempt(&sliding, 1)
+  Clock.advance(&slideClock, 400)
+  let slideFreed = Limiter.attempt(&sliding, 1)
+
+  let chainClock = Clock.manual(0)
+  let roomy = made(Concurrency.create(&Concurrency.Options{..Concurrency.defaults(), permitLimit: 5}))
+  let tight = made(FixedWindow.create(&FixedWindow.Options{..FixedWindow.defaults(), permitLimit: 1, window: 1000, clock: Clock.ofManual(&chainClock)}))
+  let chained = Limiter.chain([roomy, tight])
+  let c1 = Limiter.attempt(&chained, 1)
+  let c2 = Limiter.attempt(&chained, 1)
+  let roomyAfterRefusal = Limiter.statistics(&roomy).available
+  Limiter.release(&c1)
+  let chainedStats = Limiter.statistics(&chained)
+
+  let partitions = Partitioned.create(fn(context: Context.Context) -> Partitioned.Partition {
+      let key = match context.operationKey { case Some(name) => name case None => "anonymous" }
+      Partitioned.Partition{key: key, create: fn() -> Limiter.Limiter { made(Concurrency.create(&Concurrency.Options{..Concurrency.defaults(), permitLimit: 1})) }}
+    })
+  let alice = Context.keyed("alice")
+  let p1 = Partitioned.attempt(&partitions, &alice, 1)
+  let p2 = Partitioned.attempt(&partitions, &alice, 1)
+  let p3 = Partitioned.acquire(&partitions, &Context.keyed("bob"), 1)
+
+  let checks = Test.suite("Limiter", &[
+      Test.that("a request without permits waits in the queue", queuedSeen),
+      Test.equals("a request beyond the queue is denied", &overflow.grant, &Limiter.Denied(None)),
+      Test.equals("a released permit goes to the waiter", &Sync.get(&waiterGrant), &Ok(Some(Limiter.Granted))),
+      Test.equals("releasing twice returns the permit once", &afterRelease, &Limiter.Statistics{available: 1, queued: 0, failed: 1, succeeded: 2}),
+      Test.equals("newest first evicts the older waiter", &Sync.get(&evictedGrant), &Ok(Some(Limiter.Denied(None)))),
+      Test.equals("newest first serves the newer waiter", &Sync.get(&newestGrant), &Ok(Some(Limiter.Granted))),
+      Test.equals("a cancelled waiter is abandoned", &Sync.get(&cancelledGrant), &Ok(Some(Limiter.Abandoned("cancelled: gave up")))),
+      Test.equals("a cancelled waiter leaves the queue", &afterCancel.queued, &0),
+      Test.equals("a fired token is abandoned before queueing", &stoppedBefore.grant, &Limiter.Abandoned("cancelled: early")),
+      Test.that("a full bucket grants its tokens", Limiter.isGranted(&b1) && Limiter.isGranted(&b2)),
+      Test.equals("an empty bucket denies with the wait for one token", &b3.grant, &Limiter.Denied(Some(100))),
+      Test.that("a queued request waits on the clock for the next token", Limiter.isGranted(&queuedWait) && bucketSleeps > 0),
+      Test.equals("a bucket replenished by hand stays empty over time", &stillDry.grant, &Limiter.Denied(None)),
+      Test.that("replenishing by hand refills the bucket", replenished && Limiter.isGranted(&afterReplenish)),
+      Test.equals("a spent window denies until it ends", &windowDenied.grant, &Limiter.Denied(Some(750))),
+      Test.that("the next window grants again", Limiter.isGranted(&windowAgain)),
+      Test.equals("a sliding window denies until its oldest segment leaves", &slideDenied.grant, &Limiter.Denied(Some(400))),
+      Test.that("a segment leaving the window frees its permits", Limiter.isGranted(&slideFreed)),
+      Test.that("a chain grants when every limiter does", Limiter.isGranted(&c1)),
+      Test.equals("a chain answers the first refusal", &c2.grant, &Limiter.Denied(Some(1000))),
+      Test.equals("a refused chain releases what it took", &roomyAfterRefusal, &4),
+      Test.equals("a chain reports the tightest availability", &chainedStats.available, &0),
+      Test.that("each partition has its own permits", Limiter.isGranted(&p1) && !Limiter.isGranted(&p2) && Limiter.isGranted(&p3)),
+      Test.equals("partitions are made on first use", &Partitioned.keys(&partitions), &["alice", "bob"]),
+      Test.equals("a partition reports its counts", &Partitioned.statistics(&partitions, "alice"), &Some(Limiter.Statistics{available: 0, queued: 0, failed: 1, succeeded: 1})),
+      Test.equals("an unused partition has no counts", &Partitioned.statistics(&partitions, "carol"), &None),
+      Test.equals("invalid concurrency options are refused", &Concurrency.validate(&Concurrency.Options{..Concurrency.defaults(), permitLimit: 0, queueLimit: -1}), &["permitLimit must be at least 1", "queueLimit must not be negative"]),
+      Test.equals("invalid bucket options are refused", &TokenBucket.validate(&TokenBucket.Options{..TokenBucket.defaults(), tokenLimit: 0, tokensPerPeriod: 0, replenishmentPeriod: 0, queueLimit: -1}).length(), &4),
+      Test.equals("invalid window options are refused", &FixedWindow.validate(&FixedWindow.Options{..FixedWindow.defaults(), permitLimit: 0, window: 0, queueLimit: -1}).length(), &3),
+      Test.equals("a window too short for its segments is refused", &SlidingWindow.validate(&SlidingWindow.Options{..SlidingWindow.defaults(), window: 5, segmentsPerWindow: 10}), &["window must be at least 1 ms for each segment"]),
+      Test.that("refused options make no limiter", match SlidingWindow.create(&SlidingWindow.Options{..SlidingWindow.defaults(), segmentsPerWindow: 0}) { case Err(_) => true case Ok(_) => false })
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

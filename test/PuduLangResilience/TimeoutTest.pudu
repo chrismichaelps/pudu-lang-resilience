@@ -1,0 +1,79 @@
+/** @Test.Timeout.Suite — cooperative cancellation at the timeout */
+module PuduLangResilience.TimeoutTest
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Concurrent as Concurrent
+import Std.Io as Io
+import Std.Result as Result
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+import PuduLangResilience.Telemetry as Telemetry
+import PuduLangResilience.Timeout as Timeout
+
+/// A pipeline of one timeout strategy reporting to `events`.
+fn bounded(options: Timeout.Options, events: &Sync.Cell[Array[Str]]) -> Pipeline.Pipeline[Int, Str] {
+  let sink = *events
+  let settings = Pipeline.Options{..Pipeline.defaults(), listeners: [fn(event: Telemetry.Event) -> () {
+        let held = match Sync.get(&sink) { case Ok(list) => list case Err(_) => [] }
+        let _kept = Sync.set(&sink, held.push(event.name))
+      }] }
+  match Pipeline.buildWith(&settings, [Timeout.strategy(options)]) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// A callback that waits cooperatively for `millis` and then answers 1.
+fn patient(millis: Int) -> fn(Context.Context) -> Resilience.Outcome[Int, Str] {
+  fn(context: Context.Context) -> Resilience.Outcome[Int, Str] {
+    Context.pause(&context, millis) ?
+    Ok(1)
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let events: Sync.Cell[Array[Str]] = Sync.cell([])
+  let noticed: Sync.Cell[Int] = Sync.cell(0)
+  let watched = Timeout.Options{..Timeout.after(30), onTimeout: Some(fn(elapsed: Timeout.Elapsed) -> () { let _kept = Sync.set(&noticed, elapsed.timeout) })}
+  let slow = Pipeline.execute(&bounded(watched, &events), patient(2000))
+  let fast = Pipeline.execute(&bounded(Timeout.after(1000), &Sync.cell([])), patient(1))
+  let ignoring = Pipeline.execute(&bounded(Timeout.after(20), &Sync.cell([])), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let _slept = Concurrent.sleep(60)
+      Ok(2)
+    })
+  let outer = Cancel.token()
+  let _cancelled = Cancel.cancel(&outer, "caller left")
+  let byCaller = Pipeline.executeWith(&bounded(Timeout.after(1000), &Sync.cell([])), Context.cancellable(outer), patient(2000))
+  let parentDeadline = Pipeline.executeWith(&bounded(Timeout.after(1000), &Sync.cell([])), Context.cancellable(Cancel.expiring(20)), patient(2000))
+  let unbounded = Timeout.Options{..Timeout.after(10), generator: Some(fn(_context: Context.Context) -> Int { 0 })}
+  let generatedNone = Pipeline.execute(&bounded(unbounded, &Sync.cell([])), patient(40))
+  let generatedShort = Timeout.Options{..Timeout.defaults(), generator: Some(fn(_context: Context.Context) -> Int { 15 })}
+  let generatedFires = Pipeline.execute(&bounded(generatedShort, &Sync.cell([])), patient(2000))
+  let failing = Pipeline.execute(&bounded(Timeout.after(1000), &Sync.cell([])), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Resilience.raise("bad") })
+  let tooShort = Pipeline.build([Timeout.strategy(Timeout.after(9))])
+  let tooLong = Pipeline.build([Timeout.strategy(Timeout.after(86400001))])
+  let checks = Test.suite("Timeout", &[
+      Test.equals("a cooperative callback past its timeout is answered as timed out", &slow, &Err(Resilience.TimedOut(30))),
+      Test.equals("onTimeout sees the timeout", &Sync.get(&noticed), &Ok(30)),
+      Test.equals("the timeout is reported between the pipeline events", &Sync.get(&events), &Ok(["PipelineExecuting", "OnTimeout", "PipelineExecuted"])),
+      Test.equals("a callback within its timeout answers its value", &fast, &Ok(1)),
+      Test.equals("a callback ignoring its token keeps its value", &ignoring, &Ok(2)),
+      Test.equals("a cancellation by the caller is not a timeout", &byCaller, &Err(Resilience.Cancelled("cancelled: caller left"))),
+      Test.equals("an earlier deadline of the caller is not a timeout", &parentDeadline, &Err(Resilience.Cancelled("the deadline passed"))),
+      Test.equals("a generated timeout of zero runs without one", &generatedNone, &Ok(1)),
+      Test.equals("a generated timeout replaces the fixed one", &generatedFires, &Err(Resilience.TimedOut(15))),
+      Test.equals("the callback's own failure passes through", &failing, &Resilience.raise("bad")),
+      Test.that("a timeout below 10 ms is refused", Result.isErr(&tooShort)),
+      Test.that("a timeout above one day is refused", Result.isErr(&tooLong)),
+      Test.that("the bounds themselves are accepted", Timeout.validate(&Timeout.after(10)).isEmpty() && Timeout.validate(&Timeout.after(86400000)).isEmpty())
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

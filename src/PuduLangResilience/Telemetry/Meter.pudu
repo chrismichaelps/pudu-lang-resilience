@@ -1,0 +1,61 @@
+/** @Telemetry.Meter.Module — counts and durations gathered from events */
+module PuduLangResilience.Telemetry.Meter
+
+import Std.Map as Map
+import PuduLangResilience.Telemetry as Telemetry
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Telemetry.Meter.Meter — event counts and durations by series */
+export type Meter = {
+  counts: Shared.Shared[Map[Str, Int]],
+  durations: Shared.Shared[Map[Str, Array[Int]]],
+  enrich: fn(Telemetry.Event) -> Array[(Str, Str)]
+}
+
+/// A meter naming each series by event name and source.
+export fn create() -> Meter { enriched(fn(_event: Telemetry.Event) -> Array[(Str, Str)] { [] }) }
+
+/// A meter that also names each series by the tags `enrich` answers for its event.
+export fn enriched(enrich: fn(Telemetry.Event) -> Array[(Str, Str)]) -> Meter {
+  Meter{counts: Shared.shared(Map.empty()), durations: Shared.shared(Map.empty()), enrich: enrich}
+}
+
+/// A listener counting every event into the meter, and recording the duration of every attempt
+/// and every finished execution.
+export fn listener(meter: &Meter) -> Telemetry.Listener {
+  let target = *meter
+  fn(event: Telemetry.Event) -> () {
+    let label = seriesOf(&target, &event)
+    Shared.update(&target.counts, fn(held: Map[Str, Int]) -> Map[Str, Int] { Map.upsert(&held, label, 1, |seen: Int| seen + 1) })
+    let measured = match event.detail {
+      case Telemetry.Attempted(_, duration, _) => Some(duration)
+      case Telemetry.Executed(duration) => Some(duration)
+      case _ => None
+    }
+    if let Some(duration) = measured {
+      Shared.update(&target.durations, fn(held: Map[Str, Array[Int]]) -> Map[Str, Array[Int]] { Map.upsert(&held, event.name, [duration], |seen: Array[Int]| seen.push(duration)) })
+    }
+  }
+}
+
+/// How many events of the given name were counted, over every series.
+export fn count(meter: &Meter, name: Str) -> Int {
+  var total = 0
+  for entry in Map.pairs(&Shared.current(&meter.counts)) {
+    if entry[0] == name || entry[0].startsWith(name + " ") { total = total + entry[1] }
+  }
+  total
+}
+
+/// Every series and its count, in order.
+export fn series(meter: &Meter) -> Array[(Str, Int)] { Map.pairs(&Shared.current(&meter.counts)) }
+
+/// Every duration recorded for events of the given name, in the order they were reported.
+export fn durations(meter: &Meter, name: Str) -> Array[Int] { Map.getOr(&Shared.current(&meter.durations), name, []) }
+
+/// The series an event is counted in: its name, its source, and its enriched tags.
+fn seriesOf(meter: &Meter, event: &Telemetry.Event) -> Str {
+  var tags = ["source=" + Telemetry.sourceName(&event.source)]
+  for tag in (meter.enrich)(*event) { tags = tags.push(tag[0] + "=" + tag[1]) }
+  event.name + " " + tags.join(",")
+}

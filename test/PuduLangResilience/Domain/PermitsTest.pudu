@@ -1,0 +1,115 @@
+/** @Test.Domain.Permits.Suite — grants, queueing, eviction, and each algorithm */
+module PuduLangResilience.Domain.PermitsTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience.Domain.Algorithms as Algorithms
+import PuduLangResilience.Domain.Permits as Permits
+
+/// Runs the suite.
+fn main() -> Int {
+  let counting = Algorithms.concurrency(2)
+  let oldest = Permits.open(2, 2, 2, Permits.Oldest)
+  let first = Permits.request(&oldest, &counting, 0, 2, true)
+  let queuedOne = Permits.request(&first[0], &counting, 0, 1, true)
+  let queuedTwo = Permits.request(&queuedOne[0], &counting, 0, 1, true)
+  let overflow = Permits.request(&queuedTwo[0], &counting, 0, 1, true)
+  let blockedTurn = Permits.poll(&queuedTwo[0], &counting, 0, 2)
+  let returned = Permits.giveBack(&queuedTwo[0], &counting, 2)
+  let secondFirst = Permits.poll(&returned, &counting, 0, 2)
+  let oldestTurn = Permits.poll(&returned, &counting, 0, 1)
+  let newest = Permits.open(0, 2, 2, Permits.Newest)
+  let n1 = Permits.request(&newest, &counting, 0, 1, true)
+  let n2 = Permits.request(&n1[0], &counting, 0, 1, true)
+  let n3 = Permits.request(&n2[0], &counting, 0, 1, true)
+  let evictedTurn = Permits.poll(&n3[0], &counting, 0, 1)
+  let refilled = Permits.giveBack(&n3[0], &counting, 1)
+  let newestTurn = Permits.poll(&refilled, &counting, 0, 3)
+  let withdrawn = Permits.withdraw(&n3[0], 3)
+
+  let bucket = Algorithms.tokenBucket(10, 5, 100, true)
+  let fullBucket = Permits.open(Algorithms.Bucket{tokens: 10, stamp: 0}, 10, 0, Permits.Oldest)
+  let drained = Permits.request(&fullBucket, &bucket, 0, 10, false)
+  let dry = Permits.request(&drained[0], &bucket, 30, 7, false)
+  let manualBucket = Algorithms.tokenBucket(10, 4, 100, false)
+  let empty = Permits.open(Algorithms.Bucket{tokens: 0, stamp: 0}, 10, 0, Permits.Oldest)
+
+  let fixed = Algorithms.fixedWindow(3, 1000, true)
+  let windowBook = Permits.open(Algorithms.Window{used: 0, start: 0}, 3, 0, Permits.Oldest)
+  let usedUp = Permits.request(&windowBook, &fixed, 100, 3, false)
+  let overWindow = Permits.request(&usedUp[0], &fixed, 400, 1, false)
+  let nextWindow = Permits.request(&usedUp[0], &fixed, 2500, 1, false)
+
+  let sliding = Algorithms.slidingWindow(4, 1000, 4, true)
+  let slideBook = Permits.open(Algorithms.Segments{counts: [0, 0, 0, 0], start: 0}, 4, 0, Permits.Oldest)
+  let early = Permits.request(&slideBook, &sliding, 0, 3, false)
+  let late = Permits.request(&early[0], &sliding, 600, 1, false)
+  let full = Permits.request(&late[0], &sliding, 700, 1, false)
+
+  let twoEvicted = Permits.request(&Permits.request(&n3[0], &counting, 0, 1, true)[0], &counting, 0, 1, true)
+  let firstEvictedSeen = Permits.poll(&twoEvicted[0], &counting, 0, 1)
+  let secondEvictedSeen = Permits.poll(&firstEvictedSeen[0], &counting, 0, 2)
+  let withdrawnKeepsOthers = Permits.poll(&withdrawn, &counting, 0, 1)
+  let newestFree = Permits.open(1, 2, 2, Permits.Newest)
+  let newestWaiting = Permits.request(&Permits.request(&newestFree, &counting, 0, 2, true)[0], &counting, 0, 1, true)
+  let newestPasses = Permits.request(&Permits.giveBack(&newestWaiting[0], &counting, 1), &counting, 0, 1, true)
+  let oldestFree = Permits.open(1, 2, 3, Permits.Oldest)
+  let oldestWaiting = Permits.request(&oldestFree, &counting, 0, 2, true)
+  let oldestQueues = Permits.request(&Permits.giveBack(&oldestWaiting[0], &counting, 1), &counting, 0, 1, true)
+  let manualWindow = Algorithms.fixedWindow(3, 1000, false)
+  let spentWindow = Permits.request(&Permits.open(Algorithms.Window{used: 0, start: 0}, 3, 0, Permits.Oldest), &manualWindow, 0, 3, false)[0]
+  let manualSliding = Algorithms.slidingWindow(2, 1000, 2, false)
+  let spentSliding = Permits.request(&Permits.open(Algorithms.Segments{counts: [0, 0], start: 0}, 2, 0, Permits.Oldest), &manualSliding, 0, 2, false)[0]
+  let checks = Test.suite("Domain.Permits", &[
+      Test.not("a concurrency limiter refuses replenishment by hand", Permits.replenish(&oldest, &counting)[1]),
+      Test.not("an automatic window refuses replenishment by hand", Permits.replenish(&windowBook, &fixed)[1]),
+      Test.equals("a window replenished by hand does not move with time", &Permits.available(&spentWindow, &manualWindow, 99999), &0),
+      Test.equals("replenishing a window by hand empties it", &(Permits.replenish(&spentWindow, &manualWindow)[1], Permits.available(&Permits.replenish(&spentWindow, &manualWindow)[0], &manualWindow, 0)), &(true, 3)),
+      Test.not("an automatic sliding window refuses replenishment by hand", Permits.replenish(&slideBook, &sliding)[1]),
+      Test.equals("a sliding window replenished by hand does not move with time", &Permits.available(&spentSliding, &manualSliding, 99999), &0),
+      Test.equals("replenishing a sliding window by hand moves it one segment", &(Permits.replenish(&spentSliding, &manualSliding)[1], Permits.available(&Permits.replenish(&spentSliding, &manualSliding)[0], &manualSliding, 0)), &(true, 0)),
+      Test.equals("a second hand replenishment frees the oldest segment", &Permits.available(&Permits.replenish(&Permits.replenish(&spentSliding, &manualSliding)[0], &manualSliding)[0], &manualSliding, 0), &2),
+      Test.equals("a manual window gives no retry time", &Permits.request(&spentWindow, &manualWindow, 0, 1, false)[1], &Permits.Deny(None)),
+      Test.equals("each evicted waiter learns of it separately", &(firstEvictedSeen[1], secondEvictedSeen[1]), &(Permits.Evicted, Permits.Evicted)),
+      Test.equals("withdrawing one waiter keeps other evictions", &withdrawnKeepsOthers[1], &Permits.Evicted),
+      Test.equals("newest first grants a new request past older waiters", &newestPasses[1], &Permits.Grant),
+      Test.equals("oldest first queues a new request behind older waiters", &oldestQueues[1], &Permits.Queue(2)),
+      Test.equals("available permits are granted", &first[1], &Permits.Grant),
+      Test.equals("a request without permits joins the queue", &(queuedOne[1], queuedTwo[1]), &(Permits.Queue(1), Permits.Queue(2))),
+      Test.equals("a full queue denies with no retry time", &overflow[1], &Permits.Deny(None)),
+      Test.equals("queued permits are counted", &Permits.queued(&queuedTwo[0]), &2),
+      Test.equals("a waiter without permits keeps waiting", &blockedTurn[1], &Permits.Waiting),
+      Test.equals("a later waiter may not pass the oldest", &secondFirst[1], &Permits.Waiting),
+      Test.equals("the oldest waiter is served first", &oldestTurn[1], &Permits.Taken),
+      Test.equals("a request above the permit limit is denied", &Permits.request(&oldest, &counting, 0, 3, true)[1], &Permits.Deny(None)),
+      Test.equals("a negative request is denied", &Permits.request(&oldest, &counting, 0, -1, true)[1], &Permits.Deny(None)),
+      Test.equals("a request for no permits is granted while any is free", &Permits.request(&oldest, &counting, 0, 0, false)[1], &Permits.Grant),
+      Test.equals("a request for no permits is denied when none is free", &Permits.request(&first[0], &counting, 0, 0, false)[1], &Permits.Deny(None)),
+      Test.equals("a request that may not queue is denied", &Permits.request(&first[0], &counting, 0, 1, false)[1], &Permits.Deny(None)),
+      Test.equals("newest first evicts the oldest waiter", &n3[1], &Permits.Queue(3)),
+      Test.equals("an evicted waiter learns it on its next turn", &evictedTurn[1], &Permits.Evicted),
+      Test.equals("an eviction counts as a failure", &n3[0].failed, &1),
+      Test.equals("the newest waiter is served first", &newestTurn[1], &Permits.Taken),
+      Test.equals("a withdrawn waiter leaves the queue and counts as a failure", &(Permits.queued(&withdrawn), withdrawn.failed), &(1, 2)),
+      Test.equals("returned concurrency permits never exceed the limit", &Permits.available(&Permits.giveBack(&oldest, &counting, 5), &counting, 0), &2),
+      Test.equals("grants are counted", &drained[0].succeeded, &1),
+      Test.equals("an empty bucket tells when enough tokens return", &dry[1], &Permits.Deny(Some(170))),
+      Test.equals("tokens return per whole period", &Permits.available(&drained[0], &bucket, 250), &10),
+      Test.equals("tokens never exceed the limit", &Permits.available(&fullBucket, &bucket, 100000), &10),
+      Test.equals("a bucket replenished by hand does not refill with time", &Permits.available(&empty, &manualBucket, 100000), &0),
+      Test.equals("a bucket replenished by hand refills one period at a time", &Permits.available(&Permits.replenish(&empty, &manualBucket)[0], &manualBucket, 0), &4),
+      Test.equals("a bucket replenished by hand gives no retry time", &Permits.request(&empty, &manualBucket, 0, 1, false)[1], &Permits.Deny(None)),
+      Test.not("an automatic bucket refuses replenishment by hand", Permits.replenish(&fullBucket, &bucket)[1]),
+      Test.equals("a used-up window denies until it ends", &overWindow[1], &Permits.Deny(Some(600))),
+      Test.equals("a new window grants again", &nextWindow[1], &Permits.Grant),
+      Test.equals("a sliding window counts every segment still inside it", &full[1], &Permits.Deny(Some(300))),
+      Test.equals("permits in the newest segment were taken", &late[1], &Permits.Grant),
+      Test.equals("shifting past every segment empties them", &Algorithms.shifted(&[1, 2, 3], 7), &[0, 0, 0]),
+      Test.equals("shifting drops the oldest segments", &Algorithms.shifted(&[1, 2, 3], 1), &[2, 3, 0])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

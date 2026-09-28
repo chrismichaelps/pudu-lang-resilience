@@ -1,0 +1,63 @@
+/** @Chaos.Outcome.Strategy — answers a chosen outcome instead of running the callback */
+module PuduLangResilience.Chaos.Outcome
+
+import PuduLangResilience.Chaos as Chaos
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Chaos.Outcome.Injected — the outcome injected into one execution */
+export type Injected[T, E] = { context: Context.Context, outcome: Resilience.Outcome[T, E] }
+
+/** @Chaos.Outcome.Options — which outcome to inject and how often */
+export type Options[T, E] = {
+  name: Option[Str],
+  injection: Chaos.Injection,
+  outcome: Option[Resilience.Outcome[T, E]],
+  generator: Option[fn(Chaos.Arguments) -> Option[Resilience.Outcome[T, E]]],
+  onInjected: Option[fn(Injected[T, E]) -> ()]
+}
+
+/// The default injection with no outcome chosen yet.
+export fn defaults[T, E]() -> Options[T, E] { Options{name: None, injection: Chaos.defaults(), outcome: None, generator: None, onInjected: None} }
+
+/// Injects `outcome` at the given injection settings.
+export fn injecting[T, E](outcome: Resilience.Outcome[T, E], injection: Chaos.Injection) -> Options[T, E] {
+  Options{..defaults(), injection: injection, outcome: Some(outcome)}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate[T, E](options: &Options[T, E]) -> Array[Str] {
+  var problems = Chaos.validate(&options.injection)
+  if options.outcome == None && options.generator == None { problems = problems.push("an outcome or a generator is required") }
+  problems
+}
+
+/// An outcome injection strategy following the options. The generator is used when given; a
+/// generator answering nothing injects nothing.
+export fn strategy[T, E](options: Options[T, E]) -> Strategy.Strategy[T, E] {
+  Strategy.Strategy {
+    name: options.name,
+    kind: "ChaosOutcome",
+    summary: "injects an outcome at rate " + show(options.injection.rate),
+    problems: validate(&options),
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      if !Chaos.shouldInject(&options.injection, &context, &runtime.randomizer) { return callback(context) }
+      let chosen = match options.generator {
+        case Some(generate) => generate(Chaos.arguments(&context, &runtime.randomizer))
+        case None => options.outcome
+      }
+      match chosen {
+        case Some(outcome) => {
+          Telemetry.report(&runtime.telemetry, &context, Events.ON_OUTCOME, Telemetry.Information, Some(Resilience.summarize(&outcome)), Telemetry.OutcomeInjected)
+          if let Some(notify) = options.onInjected { notify(Injected{context: context, outcome: outcome}) }
+          outcome
+        }
+        case None => callback(context)
+      }
+    }
+  }
+}

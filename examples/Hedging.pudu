@@ -1,0 +1,28 @@
+/** @Examples.Hedging.Program — a hedged request beating a slow one */
+module Hedging
+
+import Std.Io as Io
+import Std.Sync as Sync
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Hedging as Hedging
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+
+/// Starts a hedge when the first replica is slow and answers the first replica to reply.
+fn main() -> Int {
+  let pipeline = match Pipeline.build([Hedging.strategy(Hedging.Options{..Hedging.defaults(), maxHedgedAttempts: 2, delay: 50})]) {
+    case Ok(found) => found
+    case Err(invalid) => {
+      let _said = Io.writeErrorLine(Pipeline.explain(&invalid))
+      return 1
+    }
+  }
+  let replicas = Sync.counter(0)
+  let answer = Pipeline.execute(&pipeline, fn(context: Context.Context) -> Resilience.Outcome[Str, Str] {
+      let replica = match Sync.increment(&replicas, 1) { case Ok(n) => n case Err(_) => 0 }
+      if replica == 1 { Context.pause(&context, 5000) ? }
+      Ok("replica " + show(replica))
+    })
+  let _shown = Io.writeLine("answered by " + Resilience.summarize(&answer))
+  if answer == Ok("replica 2") { 0 } else { 1 }
+}

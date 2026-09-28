@@ -1,0 +1,106 @@
+/** @Resilience.Telemetry.Seam — events strategies report while executing */
+module PuduLangResilience.Telemetry
+
+import Std.Option as Option
+import PuduLangResilience.Context as Context
+
+/** @Resilience.Telemetry.Severity — how much an event matters */
+export type Severity = Silent | Debug | Information | Warning | Error | Critical
+
+/** @Resilience.Telemetry.Source — the pipeline and strategy reporting */
+export type Source = { pipelineName: Option[Str], pipelineInstance: Option[Str], strategyName: Option[Str] }
+
+/** @Resilience.Telemetry.Detail — what each kind of event measured */
+export type Detail
+  = Executing
+  | Executed(Int)
+  | Attempted(Int, Int, Bool)
+  | Retrying(Int, Int)
+  | Opened(Int, Bool)
+  | Closed(Bool)
+  | HalfOpened
+  | FellBack
+  | Hedged(Int)
+  | TimeoutElapsed(Int)
+  | Rejected(Option[Int])
+  | FaultInjected
+  | OutcomeInjected
+  | LatencyInjected(Int)
+  | BehaviorInjected
+
+/** @Resilience.Telemetry.Event — one reported occurrence */
+export type Event = {
+  name: Str,
+  severity: Severity,
+  source: Source,
+  operationKey: Option[Str],
+  outcome: Option[Str],
+  detail: Detail
+}
+
+/** @Resilience.Telemetry.Listener — receives every reported event */
+export type Listener = fn(Event) -> ()
+
+/** @Resilience.Telemetry.Reporter — where one strategy's events go */
+export type Reporter = { source: Source, emit: fn(Event) -> () }
+
+/// A reporter for `source` that gives each event the severity `severityOf` answers, when given,
+/// and hands every event not `Silent` to each listener in order.
+export fn reporter(source: Source, listeners: &Array[Listener], severityOf: &Option[fn(Event) -> Severity]) -> Reporter {
+  let targets = *listeners
+  let override = *severityOf
+  Reporter{source: source, emit: fn(event: Event) -> () {
+      let graded = match override {
+        case Some(grade) => Event{..event, severity: grade(event)}
+        case None => event
+      }
+      if graded.severity != Silent {
+        for listener in targets { listener(graded) }
+      }
+    } }
+}
+
+/// A reporter that drops every event.
+export fn silent() -> Reporter {
+  Reporter{source: Source{pipelineName: None, pipelineInstance: None, strategyName: None}, emit: fn(_event: Event) -> () { () }}
+}
+
+/// The same reporter naming another strategy as the source.
+export fn forStrategy(base: &Reporter, strategyName: Option[Str]) -> Reporter {
+  Reporter{..*base, source: Source{..base.source, strategyName: strategyName}}
+}
+
+/// Reports one event from the reporter's source about the execution holding `context`.
+export fn report(target: &Reporter, context: &Context.Context, name: Str, severity: Severity, outcome: Option[Str], detail: Detail) -> () {
+  (target.emit)(Event{name: name, severity: severity, source: target.source, operationKey: context.operationKey, outcome: outcome, detail: detail})
+}
+
+/// The severity's name.
+export fn severityName(value: &Severity) -> Str {
+  match value {
+    case Silent => "Silent"
+    case Debug => "Debug"
+    case Information => "Information"
+    case Warning => "Warning"
+    case Error => "Error"
+    case Critical => "Critical"
+  }
+}
+
+/// The rank of a severity, from 0 for `Silent` to 5 for `Critical`.
+export fn rank(value: &Severity) -> Int {
+  match value {
+    case Silent => 0
+    case Debug => 1
+    case Information => 2
+    case Warning => 3
+    case Error => 4
+    case Critical => 5
+  }
+}
+
+/// The source as one dotted name, leaving out the parts it lacks.
+export fn sourceName(value: &Source) -> Str {
+  let parts = Option.toArray(value.pipelineName).concat(Option.toArray(value.pipelineInstance)).concat(Option.toArray(value.strategyName))
+  if parts.isEmpty() { "(unnamed)" } else { parts.join("/") }
+}

@@ -1,0 +1,39 @@
+/** @Utils.Numeric.Module — saturating integers and float conversion */
+module PuduLangResilience.Utils.Numeric
+
+import Std.Decimal as Decimal
+import Std.Math.Float as Float
+import Std.Option as Option
+
+/// The largest count or duration the package represents.
+export const LARGEST: Int = 9223372036854775807
+
+/// `left + right`, or `LARGEST` when the sum would exceed it. Both are at least zero.
+export fn add(left: Int, right: Int) -> Int {
+  if left > LARGEST - right { LARGEST } else { left + right }
+}
+
+/// `left * right`, or `LARGEST` when the product would exceed it. Both are at least zero.
+export fn multiply(left: Int, right: Int) -> Int {
+  if left == 0 || right == 0 { return 0 }
+  if left > LARGEST / right { LARGEST } else { left * right }
+}
+
+/// The float nearest to an integer.
+export fn toFloat(value: Int) -> Float { Decimal.toFloat64(Decimal.fromInt(value)) }
+
+/// The whole part of a float, clamped to zero below and to `LARGEST` above; `LARGEST` for a
+/// value that is not finite.
+export fn toInt(value: Float) -> Int {
+  if !Float.isFinite(value) { return LARGEST }
+  if value <= 0.0 { return 0 }
+  if value >= 9.0e18 { return LARGEST }
+  let whole = Float.floor(value)
+  let parsed = Option.andThen(Decimal.parse(show(whole)), fn(exact: Decimal) -> Option[Int] { Decimal.toInt(Decimal.floor(exact)) })
+  Option.unwrapOr(parsed, LARGEST)
+}
+
+/// The count of parts per `whole` that `ratio` names, rounded down. `ratio` is between 0 and 1.
+export fn partsOf(ratio: Decimal, whole: Int) -> Int {
+  Option.unwrapOr(Decimal.toInt(Decimal.floor(ratio * Decimal.fromInt(whole))), 0)
+}

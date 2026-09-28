@@ -1,0 +1,31 @@
+/** @Limiter.Concurrency.Module — at most N executions at once */
+module PuduLangResilience.Limiter.Concurrency
+
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Domain.Algorithms as Algorithms
+import PuduLangResilience.Limiter.Engine as Engine
+import PuduLangResilience.Limiter as Limiter
+
+/** @Limiter.Concurrency.Options — permits held at once and the queue behind them */
+export type Options = { permitLimit: Int, queueLimit: Int, queueOrder: Limiter.QueueOrder, clock: Clock.Clock }
+
+/// A thousand permits, no queue, oldest first, on the system clock.
+export fn defaults() -> Options {
+  Options{permitLimit: 1000, queueLimit: 0, queueOrder: Limiter.OldestFirst, clock: Clock.system()}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate(options: &Options) -> Array[Str] {
+  var problems: Array[Str] = []
+  if options.permitLimit < 1 { problems = problems.push("permitLimit must be at least 1") }
+  if options.queueLimit < 0 { problems = problems.push("queueLimit must not be negative") }
+  problems
+}
+
+/// A concurrency limiter following the options, or every reason it cannot be made.
+export fn create(options: &Options) -> Result[Limiter.Limiter, Array[Str]] {
+  let problems = validate(options)
+  if !problems.isEmpty() { return Err(problems) }
+  let queueing = Engine.Queueing{permitLimit: options.permitLimit, queueLimit: options.queueLimit, order: options.queueOrder}
+  Ok(Engine.limiter(options.permitLimit, Algorithms.concurrency(options.permitLimit), &queueing, options.clock))
+}

@@ -1,0 +1,11 @@
+[package]
+name = "@chrismichaelps/pudu-lang-resilience"
+version = "0.1.0"
+description = "Resilience pipelines for Pudu: retry, circuit breaker, timeout, fallback, hedging, rate limiting, and chaos injection"
+license = "Apache-2.0"
+keywords = ["resilience", "retry", "circuit-breaker", "timeout", "rate-limiter", "hedging", "fallback", "chaos"]
+language = ">=0.1.2 <0.2.0"
+source = "src"
+root = "PuduLangResilience"
+
+[dependencies]

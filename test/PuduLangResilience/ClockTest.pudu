@@ -1,0 +1,63 @@
+/** @Test.Clock.Suite — manual and system clocks, and randomizers */
+module PuduLangResilience.ClockTest
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Randomizer as Randomizer
+
+/// `count` draws below `bound`.
+fn draws(source: &Randomizer.Randomizer, bound: Int, count: Int) -> Array[Int] {
+  var drawn: Array[Int] = []
+  while drawn.length() < count { drawn = drawn.push(Randomizer.below(source, bound)) }
+  drawn
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let manual = Clock.manual(100)
+  let clock = Clock.ofManual(&manual)
+  let startedAt = Clock.now(&clock)
+  let slept = Clock.sleep(&clock, 50, &Cancel.token())
+  let negative = Clock.sleep(&clock, -5, &Cancel.token())
+  Clock.advance(&manual, 10)
+  Clock.advance(&manual, -10)
+  let stopped = Cancel.token()
+  let _fired = Cancel.cancel(&stopped, "no")
+  let refused = Clock.sleep(&clock, 30, &stopped)
+  let system = Clock.system()
+  let before = Clock.now(&system)
+  let systemSlept = Clock.sleep(&system, 5, &Cancel.token())
+  let after = Clock.now(&system)
+  let seeded = draws(&Randomizer.seeded(42), 100, 20)
+  let again = draws(&Randomizer.seeded(42), 100, 20)
+  let other = draws(&Randomizer.seeded(-7), 100, 20)
+  let live = Randomizer.system()
+  let fixedHalf = Randomizer.fixed(0.5d)
+  let checks = Test.suite("Clock", &[
+      Test.equals("a manual clock starts where told", &startedAt, &100),
+      Test.equals("sleeping on a manual clock advances it", &(slept, Clock.now(&clock)), &(Ok(()), 160)),
+      Test.equals("a negative sleep is recorded as none", &(negative, Clock.sleeps(&manual)), &(Ok(()), [50, 0])),
+      Test.that("a fired token refuses to sleep", match refused { case Err(_) => true case Ok(_) => false }),
+      Test.equals("a refused sleep is not recorded", &Clock.sleeps(&manual).length(), &2),
+      Test.that("the system clock waits", systemSlept == Ok(()) && after - before >= 5),
+      Test.equals("a seed repeats its sequence", &seeded, &again),
+      Test.differs("different seeds differ", &seeded, &other),
+      Test.all("draws stay below their bound", &draws(&live, 7, 200), |drawn: Int| drawn >= 0 && drawn < 7),
+      Test.equals("a bound below one draws zero", &Randomizer.below(&live, 0), &0),
+      Test.equals("a fixed ratio draws that share of the bound", &draws(&fixedHalf, 10, 2), &[5, 5]),
+      Test.equals("a fixed ratio is clamped", &(Randomizer.below(&Randomizer.fixed(-1d), 10), Randomizer.below(&Randomizer.fixed(2d), 10)), &(0, 9)),
+      Test.equals("a fraction is parts of the scale", &Randomizer.fraction(&fixedHalf), &(Randomizer.SCALE / 2)),
+      Test.that("a unit draw is a fraction of one", Randomizer.unit(&fixedHalf) == 0.5),
+      Test.that("a rate of one always holds", Randomizer.chance(&Randomizer.fixed(0.999999d), 1d)),
+      Test.not("a rate of zero never holds", Randomizer.chance(&Randomizer.fixed(0d), 0d)),
+      Test.that("a draw below the rate holds", Randomizer.chance(&fixedHalf, 0.500001d)),
+      Test.not("a draw at the rate does not hold", Randomizer.chance(&fixedHalf, 0.5d))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

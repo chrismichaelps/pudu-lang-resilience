@@ -1,0 +1,138 @@
+/** @Test.Retry.Suite — retries, delays, predicates, cancellation, and telemetry */
+module PuduLangResilience.RetryTest
+
+import Std.Io as Io
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience.Randomizer as Randomizer
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Telemetry as Telemetry
+
+/// Options on a manual clock with a fixed randomizer, recording every event.
+fn optionsOn(clock: &Clock.Manual, events: &Sync.Cell[Array[Telemetry.Event]]) -> Pipeline.Options {
+  let sink = *events
+  Pipeline.Options {
+    ..Pipeline.defaults(),
+    name: Some("orders"),
+    clock: Clock.ofManual(clock),
+    randomizer: Randomizer.fixed(0.5d),
+    listeners: [fn(event: Telemetry.Event) -> () {
+        let held = match Sync.get(&sink) { case Ok(list) => list case Err(_) => [] }
+        let _kept = Sync.set(&sink, held.push(event))
+      }]
+  }
+}
+
+/// A pipeline of one retry strategy on a manual clock.
+fn retrying(options: Retry.Options[Int, Str], clock: &Clock.Manual, events: &Sync.Cell[Array[Telemetry.Event]]) -> Pipeline.Pipeline[Int, Str] {
+  match Pipeline.buildWith(&optionsOn(clock, events), [Retry.strategy(options)]) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// A callback failing until the given call, counting its calls.
+fn failingUntil(success: Int, calls: &Sync.Counter) -> fn(Context.Context) -> Resilience.Outcome[Int, Str] {
+  let counter = *calls
+  fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+    let made = match Sync.increment(&counter, 1) { case Ok(n) => n case Err(_) => 0 }
+    if made < success { Resilience.raise("transient") } else { Ok(made) }
+  }
+}
+
+/// The names of the recorded events.
+fn names(events: &Sync.Cell[Array[Telemetry.Event]]) -> Array[Str] {
+  match Sync.get(events) {
+    case Ok(list) => list.map(fn(event: Telemetry.Event) -> Str { event.name })
+    case Err(_) => []
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let events: Sync.Cell[Array[Telemetry.Event]] = Sync.cell([])
+  let clock = Clock.manual(0)
+  let calls = Sync.counter(0)
+  let recovered = Pipeline.execute(&retrying(Retry.defaults(), &clock, &events), failingUntil(3, &calls))
+
+  let exhaustedClock = Clock.manual(0)
+  let exhaustedCalls = Sync.counter(0)
+  let exhausted = Pipeline.execute(&retrying(Retry.Options{..Retry.defaults(), maxRetryAttempts: 2, delay: 10}, &exhaustedClock, &Sync.cell([])), failingUntil(99, &exhaustedCalls))
+
+  let linearClock = Clock.manual(0)
+  let _linear = Pipeline.execute(&retrying(Retry.Options{..Retry.defaults(), backoff: Retry.Linear, delay: 100, maxRetryAttempts: 4}, &linearClock, &Sync.cell([])), failingUntil(99, &Sync.counter(0)))
+
+  let exponentialClock = Clock.manual(0)
+  let _exponential = Pipeline.execute(&retrying(Retry.Options{..Retry.defaults(), backoff: Retry.Exponential, delay: 100, maxRetryAttempts: 5, maxDelay: Some(1000)}, &exponentialClock, &Sync.cell([])), failingUntil(99, &Sync.counter(0)))
+
+  let jitterClock = Clock.manual(0)
+  let _jitter = Pipeline.execute(&retrying(Retry.Options{..Retry.defaults(), useJitter: true, delay: 1000, maxRetryAttempts: 2}, &jitterClock, &Sync.cell([])), failingUntil(99, &Sync.counter(0)))
+
+  let generatedClock = Clock.manual(0)
+  let generated = Retry.Options{..Retry.defaults(), delayGenerator: Some(fn(given: Predicate.Arguments[Int, Str]) -> Option[Int] {
+        if given.attempt == 0 { Some(7) } else if given.attempt == 1 { Some(-5) } else { None }
+      }) }
+  let _generatedRun = Pipeline.execute(&retrying(generated, &generatedClock, &Sync.cell([])), failingUntil(99, &Sync.counter(0)))
+
+  let unhandledCalls = Sync.counter(0)
+  let onlyTimeouts = Retry.Options{..Retry.defaults(), shouldHandle: Predicate.timeouts()}
+  let unhandled = Pipeline.execute(&retrying(onlyTimeouts, &Clock.manual(0), &Sync.cell([])), failingUntil(99, &unhandledCalls))
+
+  let resultCalls = Sync.counter(0)
+  let onResult = Retry.Options{..Retry.defaults(), delay: 0, shouldHandle: Predicate.results(fn(value: Int) -> Bool { value < 3 })}
+  let byResult = Pipeline.execute(&retrying(onResult, &Clock.manual(0), &Sync.cell([])), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      match Sync.increment(&resultCalls, 1) { case Ok(n) => Ok(n) case Err(_) => Ok(0) }
+    })
+
+  let cancelledCalls = Sync.counter(0)
+  let cancelling = Context.create()
+  let cancelled = Pipeline.executeWith(&retrying(Retry.defaults(), &Clock.manual(0), &Sync.cell([])), cancelling, fn(context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let _counted = Sync.increment(&cancelledCalls, 1)
+      Context.cancel(&context, "shutdown")
+      Resilience.raise("transient")
+    })
+
+  let seen: Sync.Cell[Array[Int]] = Sync.cell([])
+  let observed = Retry.Options{..Retry.defaults(), delay: 5, onRetry: Some(fn(retry: Retry.Retrying[Int, Str]) -> () {
+        let held = match Sync.get(&seen) { case Ok(list) => list case Err(_) => [] }
+        let _kept = Sync.set(&seen, held.push(retry.attempt * 100 + retry.delay))
+      }) }
+  let _observedRun = Pipeline.execute(&retrying(observed, &Clock.manual(0), &Sync.cell([])), failingUntil(99, &Sync.counter(0)))
+
+  let unlimitedCalls = Sync.counter(0)
+  let unlimited = Pipeline.execute(&retrying(Retry.Options{..Retry.defaults(), maxRetryAttempts: Retry.UNLIMITED, delay: 0}, &Clock.manual(0), &Sync.cell([])), failingUntil(50, &unlimitedCalls))
+
+  let invalid = Pipeline.build([Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 0, delay: -1, maxDelay: Some(86400001)})])
+  let problems = match invalid { case Err(found) => found.problems case Ok(_) => [] }
+
+  let checks = Test.suite("Retry", &[
+      Test.equals("a transient failure is retried until it succeeds", &recovered, &Ok(3)),
+      Test.equals("the constant delay is waited before each retry", &Clock.sleeps(&clock), &[2000, 2000]),
+      Test.equals("the last failure is answered when retries run out", &exhausted, &Resilience.raise("transient")),
+      Test.equals("the callback runs once more than the retry count", &Sync.count(&exhaustedCalls), &Ok(3)),
+      Test.equals("linear delays grow by the base delay", &Clock.sleeps(&linearClock), &[100, 200, 300, 400]),
+      Test.equals("exponential delays double up to the ceiling", &Clock.sleeps(&exponentialClock), &[100, 200, 400, 800, 1000]),
+      Test.equals("jitter at the midpoint keeps the delay", &Clock.sleeps(&jitterClock), &[1000, 1000]),
+      Test.equals("a generated delay replaces the computed one; a negative or absent one does not", &Clock.sleeps(&generatedClock), &[7, 2000, 2000]),
+      Test.equals("an unhandled failure is answered at once", &unhandled, &Resilience.raise("transient")),
+      Test.equals("an unhandled failure is not retried", &Sync.count(&unhandledCalls), &Ok(1)),
+      Test.equals("a handled value is retried until one is not handled", &byResult, &Ok(3)),
+      Test.equals("a cancelled token stops retrying", &cancelled, &Err(Resilience.Cancelled("cancelled: shutdown"))),
+      Test.equals("cancellation ends before the next attempt", &Sync.count(&cancelledCalls), &Ok(1)),
+      Test.equals("onRetry sees each attempt and its delay", &Sync.get(&seen), &Ok([5, 105, 205])),
+      Test.equals("unlimited retries continue past any small count", &unlimited, &Ok(50)),
+      Test.equals("every invalid option is reported", &problems, &["Retry: maxRetryAttempts must be at least 1", "Retry: delay must be from 0 to 86400000 ms", "Retry: maxDelay must be from 0 to 86400000 ms"]),
+      Test.that("the defaults are valid", Retry.validate(&Retry.defaults()).isEmpty()),
+      Test.equals("attempts, retries, and the pipeline are reported in order", &names(&events), &["PipelineExecuting", "ExecutionAttempt", "OnRetry", "ExecutionAttempt", "OnRetry", "ExecutionAttempt", "PipelineExecuted"])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

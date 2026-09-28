@@ -1,0 +1,81 @@
+/** @Domain.Health.Module — rolling success and failure counts */
+module PuduLangResilience.Domain.Health
+
+import Std.Decimal as Decimal
+import Std.List as List
+import Std.Math as Math
+import Std.Option as Option
+import PuduLangResilience.Utils.Numeric as Numeric
+
+/** @Domain.Health.Window — the counts of one slice of the sampling period */
+export type Window = { start: Int, successes: Int, failures: Int }
+
+/** @Domain.Health.Health — the windows covering one sampling period */
+export type Health = { sampling: Int, windowLength: Int, windows: Array[Window] }
+
+/** @Domain.Health.Info — totals over the sampling period */
+export type Info = { throughput: Int, failures: Int }
+
+/// The number of windows a sampling period is split into.
+const WINDOWS: Int = 10
+
+/// The shortest window worth keeping, in milliseconds; a shorter period uses a single window.
+const RESOLUTION: Int = 20
+
+/// Empty counts over a sampling period of `sampling` milliseconds.
+export fn create(sampling: Int) -> Health {
+  let length = if sampling < RESOLUTION * WINDOWS { sampling } else { sampling / WINDOWS }
+  Health{sampling: sampling, windowLength: Math.max(1, length), windows: []}
+}
+
+/// The counts with one more outcome recorded at `now`.
+export fn record(health: &Health, now: Int, failed: Bool) -> Health {
+  let rolled = roll(health, now)
+  let last = rolled.windows.length() - 1
+  let current = rolled.windows[last]
+  let counted = if failed { Window{..current, failures: current.failures + 1} } else { Window{..current, successes: current.successes + 1} }
+  Health{..rolled, windows: rolled.windows.slice(0, last).push(counted)}
+}
+
+/// The totals of the windows still inside the sampling period at `now`.
+export fn info(health: &Health, now: Int) -> Info {
+  var throughput = 0
+  var failures = 0
+  for window in health.windows {
+    if now - window.start < health.sampling {
+      throughput = Numeric.add(throughput, window.successes + window.failures)
+      failures = Numeric.add(failures, window.failures)
+    }
+  }
+  Info{throughput: throughput, failures: failures}
+}
+
+/// The counts emptied.
+export fn reset(health: &Health) -> Health { Health{..*health, windows: []} }
+
+/// Whether the totals reach the minimum throughput and a failure share of at least `ratio`.
+export fn shouldBreak(totals: &Info, ratio: Decimal, minimumThroughput: Int) -> Bool {
+  totals.throughput >= minimumThroughput && Decimal.fromInt(totals.failures) >= ratio * Decimal.fromInt(totals.throughput)
+}
+
+/// The share of failures in the totals, to six places; zero without throughput.
+export fn failureRate(totals: &Info) -> Decimal {
+  if totals.throughput == 0 { return 0d }
+  Option.unwrapOr(Decimal.divideHalfEven(Decimal.fromInt(totals.failures), Decimal.fromInt(totals.throughput), 6), 0d)
+}
+
+/// The windows at `now`: a new window once the current one is full, and none older than the
+/// sampling period.
+fn roll(health: &Health, now: Int) -> Health {
+  var windows = health.windows
+  let fresh = match List.last(&windows) {
+    case Some(current) => now - current.start >= health.windowLength
+    case None => true
+  }
+  if fresh { windows = windows.push(Window{start: now, successes: 0, failures: 0}) }
+  var kept: Array[Window] = []
+  for window in windows {
+    if now - window.start < health.sampling { kept = kept.push(window) }
+  }
+  Health{..*health, windows: kept}
+}

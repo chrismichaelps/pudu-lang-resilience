@@ -1,0 +1,60 @@
+/** @Test.Fallback.Suite — substitutes for handled outcomes */
+module PuduLangResilience.FallbackTest
+
+import Std.Io as Io
+import Std.Result as Result
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Fallback as Fallback
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Predicate as Predicate
+import PuduLangResilience as Resilience
+
+/// A pipeline of one fallback strategy.
+fn guarded(options: Fallback.Options[Int, Str]) -> Pipeline.Pipeline[Int, Str] {
+  match Pipeline.build([Fallback.strategy(options)]) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// A callback answering `outcome`.
+fn answering(outcome: Resilience.Outcome[Int, Str]) -> fn(Context.Context) -> Resilience.Outcome[Int, Str] {
+  fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { outcome }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let seen: Sync.Cell[Array[Str]] = Sync.cell([])
+  let observed = Fallback.Options{..Fallback.withValue(0), onFallback: Some(fn(given: Predicate.Arguments[Int, Str]) -> () {
+        let _kept = Sync.set(&seen, [Resilience.summarize(&given.outcome)])
+      }) }
+  let derived = Fallback.Options{..Fallback.defaults(), action: Some(fn(given: Predicate.Arguments[Int, Str]) -> Resilience.Outcome[Int, Str] {
+        match given.outcome {
+          case Err(Resilience.Raised(problem)) => Ok(problem.length())
+          case _ => Ok(-1)
+        }
+      }) }
+  let byResult = Fallback.Options{..Fallback.withValue(100), shouldHandle: Predicate.result(404)}
+  let failing = Fallback.Options{..Fallback.defaults(), action: Some(fn(_given: Predicate.Arguments[Int, Str]) -> Resilience.Outcome[Int, Str] { Resilience.raise("no substitute") })}
+  let missing = Pipeline.build([Fallback.strategy(Fallback.defaults())])
+  let checks = Test.suite("Fallback", &[
+      Test.equals("a handled failure is replaced by the substitute", &Pipeline.execute(&guarded(observed), answering(Resilience.raise("down"))), &Ok(0)),
+      Test.equals("onFallback sees the handled outcome", &Sync.get(&seen), &Ok(["The operation failed: \"down\""])),
+      Test.equals("a value passes through untouched", &Pipeline.execute(&guarded(observed), answering(Ok(5))), &Ok(5)),
+      Test.equals("the substitute may depend on the outcome", &Pipeline.execute(&guarded(derived), answering(Resilience.raise("abc"))), &Ok(3)),
+      Test.equals("a cancellation is not handled by default", &Pipeline.execute(&guarded(observed), answering(Err(Resilience.Cancelled("stop")))), &Err(Resilience.Cancelled("stop"))),
+      Test.equals("a rejection by another strategy is handled by default", &Pipeline.execute(&guarded(observed), answering(Err(Resilience.TimedOut(10)))), &Ok(0)),
+      Test.equals("a handled value is replaced", &Pipeline.execute(&guarded(byResult), answering(Ok(404))), &Ok(100)),
+      Test.equals("an unhandled value is kept", &Pipeline.execute(&guarded(byResult), answering(Ok(200))), &Ok(200)),
+      Test.equals("a failing substitute is answered as is", &Pipeline.execute(&guarded(failing), answering(Resilience.raise("down"))), &Resilience.raise("no substitute")),
+      Test.equals("validation names the missing action", &Fallback.validate(&Fallback.defaults()), &["action is required"]),
+      Test.equals("a fallback without an action is refused", &Result.err(missing), &Some(Pipeline.Invalid{problems: ["Fallback: action is required"]}))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

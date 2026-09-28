@@ -1,0 +1,40 @@
+/** @Examples.RateLimiting.Program — a token bucket guarding a pipeline */
+module RateLimiting
+
+import Std.Io as Io
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Limiter.TokenBucket as TokenBucket
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.RateLimiter as RateLimiter
+import PuduLangResilience as Resilience
+
+/// Spends a bucket of three tokens, is rejected, and is admitted again after a refill.
+fn main() -> Int {
+  let clock = Clock.manual(0)
+  let bucket = match TokenBucket.create(&TokenBucket.Options{..TokenBucket.defaults(), tokenLimit: 3, tokensPerPeriod: 3, replenishmentPeriod: 1000, clock: Clock.ofManual(&clock)}) {
+    case Ok(found) => found
+    case Err(problems) => {
+      let _said = Io.writeErrorLine(problems.join("; "))
+      return 1
+    }
+  }
+  let pipeline = match Pipeline.build([RateLimiter.strategy(RateLimiter.using(bucket))]) {
+    case Ok(found) => found
+    case Err(invalid) => {
+      let _said = Io.writeErrorLine(Pipeline.explain(&invalid))
+      return 1
+    }
+  }
+  let request = fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Ok(1) }
+  var admitted = 0
+  for _call in [1, 2, 3, 4] {
+    let outcome = Pipeline.execute(&pipeline, request)
+    let _shown = Io.writeLine(Resilience.summarize(&outcome))
+    if outcome == Ok(1) { admitted = admitted + 1 }
+  }
+  Clock.advance(&clock, 1000)
+  let refilled = Pipeline.execute(&pipeline, request)
+  let _after = Io.writeLine("after a refill: " + Resilience.summarize(&refilled))
+  if admitted == 3 && refilled == Ok(1) { 0 } else { 1 }
+}

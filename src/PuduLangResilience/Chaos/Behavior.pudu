@@ -1,0 +1,56 @@
+/** @Chaos.Behavior.Strategy — runs extra behavior before the callback */
+module PuduLangResilience.Chaos.Behavior
+
+import PuduLangResilience.Chaos as Chaos
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Chaos.Behavior.Options — what to run and how often */
+export type Options[E] = {
+  name: Option[Str],
+  injection: Chaos.Injection,
+  behavior: Option[fn(Chaos.Arguments) -> Result[(), Resilience.Failure[E]]],
+  onInjected: Option[fn(Context.Context) -> ()]
+}
+
+/// The default injection with no behavior chosen yet.
+export fn defaults[E]() -> Options[E] { Options{name: None, injection: Chaos.defaults(), behavior: None, onInjected: None} }
+
+/// Runs `behavior` at the given injection settings.
+export fn injecting[E](behavior: fn(Chaos.Arguments) -> Result[(), Resilience.Failure[E]], injection: Chaos.Injection) -> Options[E] {
+  Options{..defaults(), injection: injection, behavior: Some(behavior)}
+}
+
+/// Every reason the options cannot be followed.
+export fn validate[E](options: &Options[E]) -> Array[Str] {
+  var problems = Chaos.validate(&options.injection)
+  if options.behavior == None { problems = problems.push("behavior is required") }
+  problems
+}
+
+/// A behavior injection strategy following the options. A behavior that fails answers its
+/// failure without running the callback.
+export fn strategy[T, E](options: Options[E]) -> Strategy.Strategy[T, E] {
+  Strategy.Strategy {
+    name: options.name,
+    kind: "ChaosBehavior",
+    summary: "injects behavior at rate " + show(options.injection.rate),
+    problems: validate(&options),
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      if !Chaos.shouldInject(&options.injection, &context, &runtime.randomizer) { return callback(context) }
+      match options.behavior {
+        case Some(behave) => {
+          Telemetry.report(&runtime.telemetry, &context, Events.ON_BEHAVIOR, Telemetry.Information, None, Telemetry.BehaviorInjected)
+          behave(Chaos.arguments(&context, &runtime.randomizer)) ?
+          if let Some(notify) = options.onInjected { notify(context) }
+          callback(context)
+        }
+        case None => callback(context)
+      }
+    }
+  }
+}

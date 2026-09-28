@@ -1,0 +1,33 @@
+/** @Examples.CircuitBreaking.Program — a circuit opening and recovering */
+module CircuitBreaking
+
+import Std.Io as Io
+import PuduLangResilience.CircuitBreaker as CircuitBreaker
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+
+/// Fails a dependency until its circuit opens, waits out the break, and recovers.
+fn main() -> Int {
+  let clock = Clock.manual(0)
+  let provider = CircuitBreaker.stateProvider()
+  let options = CircuitBreaker.Options{..CircuitBreaker.defaults(), failureRatio: 0.5d, minimumThroughput: 2, samplingDuration: 10000, breakDuration: 1000, stateProvider: Some(provider)}
+  let settings = Pipeline.Options{..Pipeline.defaults(), clock: Clock.ofManual(&clock)}
+  let pipeline = match Pipeline.buildWith(&settings, [CircuitBreaker.strategy(options)]) {
+    case Ok(found) => found
+    case Err(invalid) => {
+      let _said = Io.writeErrorLine(Pipeline.explain(&invalid))
+      return 1
+    }
+  }
+  let failing = fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Resilience.raise("service unavailable") }
+  let _first = Pipeline.execute(&pipeline, failing)
+  let _second = Pipeline.execute(&pipeline, failing)
+  let rejected = Pipeline.execute(&pipeline, failing)
+  let _open = Io.writeLine("while open: " + Resilience.summarize(&rejected))
+  Clock.advance(&clock, 1000)
+  let probe = Pipeline.execute(&pipeline, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Ok(200) })
+  let _closed = Io.writeLine("after the break: " + Resilience.summarize(&probe) + ", state " + show(CircuitBreaker.state(&provider)))
+  if CircuitBreaker.state(&provider) == Some(CircuitBreaker.Closed) { 0 } else { 1 }
+}

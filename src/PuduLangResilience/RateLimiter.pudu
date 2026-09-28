@@ -1,0 +1,88 @@
+/** @Resilience.RateLimiter.Strategy — admits executions only while permits last */
+module PuduLangResilience.RateLimiter
+
+import PuduLangResilience.Constants.Events as Events
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Limiter.Concurrency as Concurrency
+import PuduLangResilience.Limiter as Limiter
+import PuduLangResilience.Limiter.Partitioned as Partitioned
+import PuduLangResilience as Resilience
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Resilience.RateLimiter.Rejected — the execution a limiter turned away */
+export type Rejected = { context: Context.Context, retryAfter: Option[Int] }
+
+/** @Resilience.RateLimiter.Options — where permits come from and who hears of rejections */
+export type Options = {
+  name: Option[Str],
+  acquire: Option[fn(Context.Context) -> Limiter.Lease],
+  defaultLimiter: Concurrency.Options,
+  onRejected: Option[fn(Rejected) -> ()]
+}
+
+/// One permit per execution from a concurrency limiter of a thousand permits and no queue.
+export fn defaults() -> Options { Options{name: None, acquire: None, defaultLimiter: Concurrency.defaults(), onRejected: None} }
+
+/// One permit per execution from a concurrency limiter of `permitLimit` permits and a queue of
+/// `queueLimit`.
+export fn concurrency(permitLimit: Int, queueLimit: Int) -> Options {
+  Options{..defaults(), defaultLimiter: Concurrency.Options{..Concurrency.defaults(), permitLimit: permitLimit, queueLimit: queueLimit}}
+}
+
+/// One permit per execution from `limiter`, waiting as it allows.
+export fn using(limiter: Limiter.Limiter) -> Options {
+  Options{..defaults(), acquire: Some(fn(context: Context.Context) -> Limiter.Lease { Limiter.acquire(&limiter, 1, &context.token) })}
+}
+
+/// One permit per execution from the limiter of its partition.
+export fn partitioned(limiters: Partitioned.Partitioned) -> Options {
+  Options{..defaults(), acquire: Some(fn(context: Context.Context) -> Limiter.Lease { Partitioned.acquire(&limiters, &context, 1) })}
+}
+
+/// A rate limiter strategy following the options. Every pipeline holding the same strategy
+/// shares its default limiter.
+export fn strategy[T, E](options: Options) -> Strategy.Strategy[T, E] {
+  let made = match options.acquire {
+    case Some(given) => Ok(given)
+    case None => match Concurrency.create(&options.defaultLimiter) {
+      case Ok(limiter) => Ok(fn(context: Context.Context) -> Limiter.Lease { Limiter.acquire(&limiter, 1, &context.token) })
+      case Err(problems) => Err(problems)
+    }
+  }
+  let problems = match made {
+    case Ok(_) => []
+    case Err(found) => found
+  }
+  let take = match made {
+    case Ok(given) => given
+    case Err(_) => fn(_context: Context.Context) -> Limiter.Lease { Limiter.refused(Limiter.Denied(None)) }
+  }
+  let summary = match options.acquire {
+    case Some(_) => "custom limiter"
+    case None => show(options.defaultLimiter.permitLimit) + " permits, queue of " + show(options.defaultLimiter.queueLimit)
+  }
+  Strategy.Strategy {
+    name: options.name,
+    kind: "RateLimiter",
+    summary: summary,
+    problems: problems,
+    attach: Strategy.detached,
+    execute: fn(runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[T, E]) -> Resilience.Outcome[T, E] {
+      let lease = take(context)
+      match lease.grant {
+        case Limiter.Granted => {
+          let outcome = callback(context)
+          Limiter.release(&lease)
+          outcome
+        }
+        case Limiter.Denied(retryAfter) => {
+          Telemetry.report(&runtime.telemetry, &context, Events.ON_RATE_LIMITER_REJECTED, Telemetry.Error, None, Telemetry.Rejected(retryAfter))
+          if let Some(notify) = options.onRejected { notify(Rejected{context: context, retryAfter: retryAfter}) }
+          Err(Resilience.RateLimited(retryAfter))
+        }
+        case Limiter.Abandoned(why) => Err(Resilience.Cancelled(why))
+      }
+    }
+  }
+}

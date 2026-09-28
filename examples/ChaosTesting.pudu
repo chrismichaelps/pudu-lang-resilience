@@ -1,0 +1,32 @@
+/** @Examples.ChaosTesting.Program — injected faults exercising a retry */
+module ChaosTesting
+
+import Std.Io as Io
+import PuduLangResilience.Chaos as Chaos
+import PuduLangResilience.Chaos.Fault as Fault
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Randomizer as Randomizer
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Telemetry.Log as Log
+import PuduLangResilience.Telemetry as Telemetry
+
+/// Injects a fault into half of all calls and lets a retry absorb it, logging every warning.
+fn main() -> Int {
+  let settings = Pipeline.Options{..Pipeline.defaults(), name: Some("chaos-demo"), randomizer: Randomizer.seeded(7), listeners: [Log.listener(Telemetry.Warning, fn(line: Str) -> () { let _w = Io.writeLine(line) })]}
+  let built = Pipeline.buildWith(&settings, [
+      Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 10, delay: 1}),
+      Fault.strategy(Fault.injecting(Resilience.Raised("injected fault"), Chaos.atRate(0.5d)))
+    ])
+  let pipeline = match built {
+    case Ok(found) => found
+    case Err(invalid) => {
+      let _said = Io.writeErrorLine(Pipeline.explain(&invalid))
+      return 1
+    }
+  }
+  let outcome = Pipeline.execute(&pipeline, fn(_context: Context.Context) -> Resilience.Outcome[Str, Str] { Ok("done") })
+  let _shown = Io.writeLine("outcome: " + Resilience.summarize(&outcome))
+  if outcome == Ok("done") { 0 } else { 1 }
+}

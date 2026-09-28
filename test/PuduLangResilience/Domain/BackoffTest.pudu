@@ -1,0 +1,57 @@
+/** @Test.Domain.Backoff.Suite — delay growth, caps, jitter, and saturation */
+module PuduLangResilience.Domain.BackoffTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangResilience.Domain.Backoff as Backoff
+import PuduLangResilience.Utils.Numeric as Numeric
+
+/// A plan with the given shape and base delay, uncapped and without jitter.
+fn plan(shape: Backoff.Shape, delay: Int) -> Backoff.Plan {
+  Backoff.Plan{shape: shape, delay: delay, maxDelay: None, useJitter: false}
+}
+
+/// The first `count` delays of a plan, drawing `draw` every time.
+fn series(given: &Backoff.Plan, count: Int, draw: Float) -> Array[Int] {
+  var delays: Array[Int] = []
+  var state = 0.0
+  var attempt = 0
+  while attempt < count {
+    let next = Backoff.next(given, attempt, state, draw)
+    delays = delays.push(next[0])
+    state = next[1]
+    attempt = attempt + 1
+  }
+  delays
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let jittered = Backoff.Plan{..plan(Backoff.Exponential, 1000), useJitter: true}
+  let decorrelated = series(&jittered, 6, 0.5)
+  let capped = Backoff.Plan{..jittered, maxDelay: Some(3000)}
+  let checks = Test.suite("Domain.Backoff", &[
+      Test.equals("a zero delay keeps the jitter state", &Backoff.next(&Backoff.Plan{..jittered, delay: 0}, 3, 1.5, 0.5), &(0, 1.5)),
+      Test.equals("exponential growth stops at saturation", &Backoff.steady(&plan(Backoff.Exponential, Numeric.LARGEST), 3), &Numeric.LARGEST),
+      Test.equals("constant delays do not grow", &series(&plan(Backoff.Constant, 1000), 4, 0.0), &[1000, 1000, 1000, 1000]),
+      Test.equals("linear delays grow by the base", &series(&plan(Backoff.Linear, 1000), 4, 0.0), &[1000, 2000, 3000, 4000]),
+      Test.equals("exponential delays double", &series(&plan(Backoff.Exponential, 1000), 5, 0.0), &[1000, 2000, 4000, 8000, 16000]),
+      Test.equals("a zero base delay is always zero", &series(&Backoff.Plan{..plan(Backoff.Exponential, 0), useJitter: true}, 3, 0.9), &[0, 0, 0]),
+      Test.equals("the ceiling caps every delay", &series(&Backoff.Plan{..plan(Backoff.Exponential, 1000), maxDelay: Some(4500)}, 5, 0.0), &[1000, 2000, 4000, 4500, 4500]),
+      Test.equals("constant jitter spans three quarters to five quarters", &[series(&Backoff.Plan{..plan(Backoff.Constant, 1000), useJitter: true}, 1, 0.0), series(&Backoff.Plan{..plan(Backoff.Constant, 1000), useJitter: true}, 1, 0.999)], &[[750], [1249]]),
+      Test.equals("linear jitter spreads around the linear delay", &series(&Backoff.Plan{..plan(Backoff.Linear, 1000), useJitter: true}, 2, 0.5), &[1000, 2000]),
+      Test.that("decorrelated jitter grows overall", decorrelated[5] > decorrelated[0]),
+      Test.all("decorrelated jitter is never negative", &decorrelated, |delay: Int| delay >= 0),
+      Test.all("decorrelated jitter respects the ceiling", &series(&capped, 8, 0.7), |delay: Int| delay <= 3000),
+      Test.equals("the first decorrelated delay follows the curve", &decorrelated[0], &897),
+      Test.equals("exponential growth saturates instead of overflowing", &Backoff.steady(&plan(Backoff.Exponential, 1000), 200), &Numeric.LARGEST),
+      Test.equals("linear growth saturates instead of overflowing", &Backoff.steady(&plan(Backoff.Linear, Numeric.LARGEST / 2), 5), &Numeric.LARGEST),
+      Test.equals("a curve that is no longer finite saturates", &Backoff.next(&jittered, 2000, 0.0, 0.5)[0], &Numeric.LARGEST),
+      Test.equals("saturated delays still meet the ceiling", &Backoff.next(&Backoff.Plan{..jittered, maxDelay: Some(86400000)}, 2000, 0.0, 0.5)[0], &86400000)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

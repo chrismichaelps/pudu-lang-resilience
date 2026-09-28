@@ -1,0 +1,47 @@
+/** @Constants.Events.Module — telemetry event names */
+module PuduLangResilience.Constants.Events
+
+/// Reported when a pipeline starts an execution.
+export const PIPELINE_EXECUTING: Str = "PipelineExecuting"
+
+/// Reported when a pipeline finishes an execution.
+export const PIPELINE_EXECUTED: Str = "PipelineExecuted"
+
+/// Reported after each attempt a retry or hedging strategy makes.
+export const EXECUTION_ATTEMPT: Str = "ExecutionAttempt"
+
+/// Reported before a retry strategy waits for its next attempt.
+export const ON_RETRY: Str = "OnRetry"
+
+/// Reported when a circuit opens.
+export const ON_CIRCUIT_OPENED: Str = "OnCircuitOpened"
+
+/// Reported when a circuit closes.
+export const ON_CIRCUIT_CLOSED: Str = "OnCircuitClosed"
+
+/// Reported when a circuit admits its half-open probe.
+export const ON_CIRCUIT_HALF_OPENED: Str = "OnCircuitHalfOpened"
+
+/// Reported before a fallback strategy produces its substitute.
+export const ON_FALLBACK: Str = "OnFallback"
+
+/// Reported before a hedging strategy starts a hedged attempt.
+export const ON_HEDGING: Str = "OnHedging"
+
+/// Reported when a timeout strategy cancels an execution.
+export const ON_TIMEOUT: Str = "OnTimeout"
+
+/// Reported when a rate limiter strategy rejects an execution.
+export const ON_RATE_LIMITER_REJECTED: Str = "OnRateLimiterRejected"
+
+/// Reported when a fault is injected.
+export const ON_FAULT: Str = "Chaos.OnFault"
+
+/// Reported when an outcome is injected.
+export const ON_OUTCOME: Str = "Chaos.OnOutcome"
+
+/// Reported when latency is injected.
+export const ON_LATENCY: Str = "Chaos.OnLatency"
+
+/// Reported when a behavior is injected.
+export const ON_BEHAVIOR: Str = "Chaos.OnBehavior"

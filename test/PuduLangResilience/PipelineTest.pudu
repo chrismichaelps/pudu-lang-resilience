@@ -1,0 +1,99 @@
+/** @Test.Pipeline.Suite — composition order, validation, nesting, and description */
+module PuduLangResilience.PipelineTest
+
+import Std.Io as Io
+import Std.Result as Result
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Timeout as Timeout
+
+/// A strategy that records its name before and after the callback.
+fn tracing(label: Str, trail: &Sync.Cell[Array[Str]]) -> Strategy.Strategy[Int, Str] {
+  let sink = *trail
+  Strategy.custom(Some(label), "Trace", fn(_runtime: Strategy.Runtime, context: Context.Context, callback: Strategy.Callback[Int, Str]) -> Resilience.Outcome[Int, Str] {
+      let before = match Sync.get(&sink) { case Ok(list) => list case Err(_) => [] }
+      let _entered = Sync.set(&sink, before.push(label + ">"))
+      let outcome = callback(context)
+      let after = match Sync.get(&sink) { case Ok(list) => list case Err(_) => [] }
+      let _left = Sync.set(&sink, after.push("<" + label))
+      outcome
+    })
+}
+
+/// The pipeline the strategies make; stops the suite when they are refused.
+fn built(strategies: Array[Strategy.Strategy[Int, Str]]) -> Pipeline.Pipeline[Int, Str] {
+  match Pipeline.build(strategies) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let trail: Sync.Cell[Array[Str]] = Sync.cell([])
+  let ordered = built([tracing("outer", &trail), tracing("inner", &trail)])
+  let answered = Pipeline.execute(&ordered, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Ok(9) })
+
+  let empty: Pipeline.Pipeline[Int, Str] = Pipeline.empty()
+  let emptyCalls = Sync.counter(0)
+  let plain = Pipeline.execute(&empty, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      let _counted = Sync.increment(&emptyCalls, 1)
+      Resilience.raise("once")
+    })
+  let lifted = Pipeline.run(&empty, fn(_context: Context.Context) -> Result[Int, Str] { Err("plain error") })
+  let liftedOk = Pipeline.run(&empty, fn(_context: Context.Context) -> Result[Int, Str] { Ok(3) })
+  let keyed = Pipeline.runWith(&empty, Context.keyed("orders"), fn(context: Context.Context) -> Result[Int, Str] {
+      match context.operationKey { case Some(key) => Ok(key.length()) case None => Err("no key") }
+    })
+
+  let innerTrail: Sync.Cell[Array[Str]] = Sync.cell([])
+  let inner = match Pipeline.buildWith(&Pipeline.Options{..Pipeline.defaults(), name: Some("inner-pipeline")}, [tracing("nested", &innerTrail)]) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+  let outer = built([tracing("host", &innerTrail), Pipeline.asStrategy(&inner)])
+  let _nestedRun = Pipeline.execute(&outer, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] { Ok(1) })
+
+  let duplicate = Pipeline.build([Retry.strategy(Retry.Options{..Retry.defaults(), name: Some("same")}), Timeout.strategy(Timeout.Options{..Timeout.defaults(), name: Some("same")})])
+  let unnamedTwice = Pipeline.build([Retry.strategy(Retry.defaults()), Retry.strategy(Retry.defaults())])
+  let collected = Pipeline.build([Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 0}), Timeout.strategy(Timeout.after(1))])
+
+  let described = Pipeline.describe(&match Pipeline.buildWith(&Pipeline.Options{..Pipeline.defaults(), name: Some("orders"), instance: Some("eu")}, [
+        Retry.strategy(Retry.Options{..Retry.defaults(), name: Some("retry"), backoff: Retry.Exponential, useJitter: true}),
+        Timeout.strategy(Timeout.after(500)),
+        Pipeline.asStrategy(&inner)
+      ]) {
+      case Ok(pipeline) => pipeline
+      case Err(invalid) => panic(Pipeline.explain(&invalid))
+    })
+
+  let checks = Test.suite("Pipeline", &[
+      Test.equals("the first strategy is the outermost", &Sync.get(&trail), &Ok(["outer>", "inner>", "<inner", "<outer"])),
+      Test.equals("the callback's outcome passes out through every layer", &answered, &Ok(9)),
+      Test.equals("an empty pipeline runs the callback once, as given", &(plain, Sync.count(&emptyCalls)), &(Resilience.raise("once"), Ok(1))),
+      Test.equals("a plain error becomes a raised failure", &lifted, &Resilience.raise("plain error")),
+      Test.equals("a plain value passes through", &liftedOk, &Ok(3)),
+      Test.equals("the given context reaches the callback", &keyed, &Ok(6)),
+      Test.equals("a nested pipeline runs as one layer", &Sync.get(&innerTrail), &Ok(["host>", "nested>", "<nested", "<host"])),
+      Test.equals("a strategy name used twice is refused", &Result.err(duplicate), &Some(Pipeline.Invalid{problems: ["the strategy name 'same' is used more than once"]})),
+      Test.that("unnamed strategies may repeat", Result.isOk(&unnamedTwice)),
+      Test.equals("problems from every strategy are collected", &Result.err(collected), &Some(Pipeline.Invalid{problems: ["Retry: maxRetryAttempts must be at least 1", "Timeout: timeout must be from 10 to 86400000 ms"]})),
+      Test.equals("a description names the pipeline", &(described.name, described.instance), &(Some("orders"), Some("eu"))),
+      Test.equals("a description lists each strategy outermost first", &described.strategies, &[
+          Pipeline.Described{name: Some("retry"), kind: "Retry", summary: "3 retries, exponential backoff from 2000 ms with jitter"},
+          Pipeline.Described{name: None, kind: "Timeout", summary: "500 ms"},
+          Pipeline.Described{name: Some("inner-pipeline"), kind: "Pipeline", summary: "1 strategies"}
+        ]),
+      Test.equals("an invalid pipeline explains itself", &Pipeline.explain(&Pipeline.Invalid{problems: ["a", "b"]}), &"The pipeline is invalid: a; b")
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

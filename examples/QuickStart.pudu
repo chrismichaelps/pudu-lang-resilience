@@ -1,0 +1,34 @@
+/** @Examples.QuickStart.Program — retry, timeout, and fallback in one pipeline */
+module QuickStart
+
+import Std.Io as Io
+import Std.Sync as Sync
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Fallback as Fallback
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Timeout as Timeout
+
+/// Runs a flaky lookup through a pipeline and prints what it answered.
+fn main() -> Int {
+  let built = Pipeline.build([
+      Fallback.strategy(Fallback.withValue("cached price")),
+      Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 3, delay: 50, backoff: Retry.Exponential, useJitter: true}),
+      Timeout.strategy(Timeout.after(500))
+    ])
+  let pipeline = match built {
+    case Ok(found) => found
+    case Err(invalid) => {
+      let _said = Io.writeErrorLine(Pipeline.explain(&invalid))
+      return 1
+    }
+  }
+  let calls = Sync.counter(0)
+  let price = Pipeline.run(&pipeline, fn(_context: Context.Context) -> Result[Str, Str] {
+      let made = match Sync.increment(&calls, 1) { case Ok(n) => n case Err(_) => 0 }
+      if made < 3 { Err("connection reset") } else { Ok("42.00") }
+    })
+  let _shown = Io.writeLine("price: " + Resilience.summarize(&price))
+  if price == Ok("42.00") { 0 } else { 1 }
+}

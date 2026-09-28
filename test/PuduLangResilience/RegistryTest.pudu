@@ -1,0 +1,77 @@
+/** @Test.Registry.Suite — building, sharing, reloading, and naming pipelines */
+module PuduLangResilience.RegistryTest
+
+import Std.Io as Io
+import Std.Option as Option
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Registry as Registry
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Strategy as Strategy
+
+/// A builder counting how many pipelines it built and naming them after the key.
+fn counting(builds: &Sync.Counter) -> Registry.Builder[Int, Str] {
+  let counter = *builds
+  fn(context: Registry.BuilderContext) -> Array[Strategy.Strategy[Int, Str]] {
+    let _counted = Sync.increment(&counter, 1)
+    [Retry.strategy(Retry.Options{..Retry.defaults(), name: Some(context.builderName + "-retry"), delay: 0})]
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let registry: Registry.Registry[Int, Str] = Registry.create()
+  let builds = Sync.counter(0)
+  let added = Registry.tryAddBuilder(&registry, "orders", counting(&builds))
+  let addedAgain = Registry.tryAddBuilder(&registry, "orders", counting(&builds))
+  let first = Registry.get(&registry, "orders")
+  let second = Registry.get(&registry, "orders")
+  let buildsAfterTwoGets = Sync.count(&builds)
+  let reloaded = Registry.reload(&registry, "orders")
+  let buildsAfterReload = Sync.count(&builds)
+  let missing = Registry.get(&registry, "payments")
+  let viaGetOrAdd = Registry.getOrAdd(&registry, "payments", counting(&builds))
+  let invalidAdded = Registry.tryAddBuilder(&registry, "broken", fn(_context: Registry.BuilderContext) -> Array[Strategy.Strategy[Int, Str]] {
+      [Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 0})]
+    })
+  let broken = Registry.get(&registry, "broken")
+
+  let named: Registry.Registry[Int, Str] = Registry.createWith(Registry.Options{..Registry.defaults(), builderName: fn(key: Str) -> Str { "svc-" + key }, instanceName: fn(key: Str) -> Option[Str] { Some(key + "-1") }})
+  let namedPipeline = Registry.getOrAdd(&named, "users", counting(&Sync.counter(0)))
+  let description = match namedPipeline { case Ok(pipeline) => Some(Pipeline.describe(&pipeline)) case Err(_) => None }
+
+  let calls = Sync.counter(0)
+  let ran = match first {
+    case Ok(pipeline) => Pipeline.execute(&pipeline, fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+        let made = match Sync.increment(&calls, 1) { case Ok(n) => n case Err(_) => 0 }
+        if made < 2 { Resilience.raise("once") } else { Ok(made) }
+      })
+    case Err(problem) => Resilience.raise(Registry.explain(&problem))
+  }
+
+  let checks = Test.suite("Registry", &[
+      Test.that("a builder is added for a new key", added),
+      Test.not("a second builder for the same key is refused", addedAgain),
+      Test.that("the pipeline is found", match (first, second) { case (Ok(_), Ok(_)) => true case _ => false }),
+      Test.equals("the pipeline is built once and shared", &buildsAfterTwoGets, &Ok(1)),
+      Test.that("a reload builds a new pipeline", match reloaded { case Ok(_) => true case Err(_) => false }),
+      Test.equals("a reload runs the builder again", &buildsAfterReload, &Ok(2)),
+      Test.equals("an unknown key is not found", &match missing { case Err(problem) => Registry.explain(&problem) case Ok(_) => "" }, &"No pipeline builder is registered for 'payments'."),
+      Test.that("getOrAdd registers and builds", match viaGetOrAdd { case Ok(_) => true case Err(_) => false }),
+      Test.equals("a registered pipeline runs its strategies", &ran, &Ok(2)),
+      Test.that("an invalid builder can be registered", invalidAdded),
+      Test.equals("an invalid pipeline is explained", &match broken { case Err(problem) => Registry.explain(&problem) case Ok(_) => "" }, &"The pipeline for 'broken' is invalid: Retry: maxRetryAttempts must be at least 1"),
+      Test.equals("tryGet answers nothing for an invalid pipeline", &(Registry.tryGet(&registry, "broken") == None), &true),
+      Test.equals("every key with a builder is listed", &Registry.keys(&registry), &["broken", "orders", "payments"]),
+      Test.equals("keys become builder and instance names", &Option.map(description, |found: Pipeline.Descriptor| (found.name, found.instance)), &Some((Some("svc-users"), Some("users-1")))),
+      Test.equals("the builder sees its names", &Option.map(description, |found: Pipeline.Descriptor| found.strategies.map(|layer: Pipeline.Described| layer.name)), &Some([Some("svc-users-retry")]))
+    ])
+  let report = Test.run(&checks)
+  for failure in Test.failuresOf(&report) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&report)
+}

@@ -1,0 +1,51 @@
+/** @Limiter.Partitioned.Module — one limiter per partition of executions */
+module PuduLangResilience.Limiter.Partitioned
+
+import Std.Map as Map
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Limiter as Limiter
+import PuduLangResilience.Utils.Shared as Shared
+
+/** @Limiter.Partitioned.Partition — the key of a partition and how to make its limiter */
+export type Partition = { key: Str, create: fn() -> Limiter.Limiter }
+
+/** @Limiter.Partitioned.Partitioned — limiters made on first use, one per key */
+export type Partitioned = { partitionOf: fn(Context.Context) -> Partition, limiters: Shared.Shared[Map[Str, Limiter.Limiter]] }
+
+/// A partitioned limiter choosing each execution's partition with `partitionOf`.
+export fn create(partitionOf: fn(Context.Context) -> Partition) -> Partitioned {
+  Partitioned{partitionOf: partitionOf, limiters: Shared.shared(Map.empty())}
+}
+
+/// Requests `permits` from the partition of the context, waiting as that limiter allows.
+export fn acquire(target: &Partitioned, context: &Context.Context, permits: Int) -> Limiter.Lease {
+  Limiter.acquire(&limiterFor(target, context), permits, &context.token)
+}
+
+/// Requests `permits` from the partition of the context without waiting.
+export fn attempt(target: &Partitioned, context: &Context.Context, permits: Int) -> Limiter.Lease {
+  Limiter.attempt(&limiterFor(target, context), permits)
+}
+
+/// The counts of a partition's limiter, once it has been used.
+export fn statistics(source: &Partitioned, key: Str) -> Option[Limiter.Statistics] {
+  let limiter = Map.get(&Shared.current(&source.limiters), key) ?
+  Some(Limiter.statistics(&limiter))
+}
+
+/// The keys of every partition used so far, in order.
+export fn keys(source: &Partitioned) -> Array[Str] { Map.keys(&Shared.current(&source.limiters)) }
+
+/// The limiter of the context's partition, made under the lock on first use.
+fn limiterFor(target: &Partitioned, context: &Context.Context) -> Limiter.Limiter {
+  let partition = (target.partitionOf)(*context)
+  Shared.change(&target.limiters, fn(held: Map[Str, Limiter.Limiter]) -> (Map[Str, Limiter.Limiter], Limiter.Limiter) {
+      match Map.get(&held, partition.key) {
+        case Some(existing) => (held, existing)
+        case None => {
+          let made = (partition.create)()
+          (Map.insert(&held, partition.key, made), made)
+        }
+      }
+    })
+}

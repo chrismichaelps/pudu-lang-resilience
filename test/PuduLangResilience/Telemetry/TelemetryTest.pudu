@@ -1,0 +1,81 @@
+/** @Test.Telemetry.Suite — reporting, severity overrides, metering, and log lines */
+module PuduLangResilience.Telemetry.TelemetryTest
+
+import Std.Io as Io
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Telemetry.Log as Log
+import PuduLangResilience.Telemetry.Meter as Meter
+import PuduLangResilience.Telemetry as Telemetry
+
+/// Runs the suite.
+fn main() -> Int {
+  let meter = Meter.enriched(fn(event: Telemetry.Event) -> Array[(Str, Str)] { [("severity", Telemetry.severityName(&event.severity))] })
+  let lines: Sync.Cell[Array[Str]] = Sync.cell([])
+  let writer = Log.listener(Telemetry.Warning, fn(line: Str) -> () {
+      let held = match Sync.get(&lines) { case Ok(list) => list case Err(_) => [] }
+      let _kept = Sync.set(&lines, held.push(line))
+    })
+  let clock = Clock.manual(0)
+  let settings = Pipeline.Options {
+    ..Pipeline.defaults(),
+    name: Some("orders"),
+    instance: Some("eu"),
+    clock: Clock.ofManual(&clock),
+    listeners: [Meter.listener(&meter), writer],
+    severityOf: Some(fn(event: Telemetry.Event) -> Telemetry.Severity {
+        if event.name == "PipelineExecuting" { Telemetry.Silent } else { event.severity }
+      })
+  }
+  let pipeline = match Pipeline.buildWith(&settings, [Retry.strategy(Retry.Options{..Retry.defaults(), name: Some("retry"), maxRetryAttempts: 1, delay: 10})]) {
+    case Ok(built) => built
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+  let _ran = Pipeline.executeWith(&pipeline, Context.keyed("checkout"), fn(_context: Context.Context) -> Resilience.Outcome[Int, Str] {
+      Clock.advance(&clock, 5)
+      Resilience.raise("down")
+    })
+  let quiet: Telemetry.Reporter = Telemetry.silent()
+  Telemetry.report(&quiet, &Context.create(), "Ignored", Telemetry.Critical, None, Telemetry.FellBack)
+  let unnamed = Telemetry.Source{pipelineName: None, pipelineInstance: None, strategyName: None}
+  let checks = Test.suite("Telemetry", &[
+      Test.equals("a silenced event reaches no listener", &Meter.count(&meter, "PipelineExecuting"), &0),
+      Test.equals("attempts are counted", &Meter.count(&meter, "ExecutionAttempt"), &2),
+      Test.equals("retries are counted", &Meter.count(&meter, "OnRetry"), &1),
+      Test.equals("attempt durations are recorded", &Meter.durations(&meter, "ExecutionAttempt"), &[5, 5]),
+      Test.equals("execution durations are recorded", &Meter.durations(&meter, "PipelineExecuted"), &[20]),
+      Test.equals("an event without durations records none", &Meter.durations(&meter, "OnRetry"), &[]),
+      Test.equals("series name the source and enriched tags", &Meter.series(&meter), &[
+          ("ExecutionAttempt source=orders/eu/retry,severity=Error", 1),
+          ("ExecutionAttempt source=orders/eu/retry,severity=Warning", 1),
+          ("OnRetry source=orders/eu/retry,severity=Warning", 1),
+          ("PipelineExecuted source=orders/eu,severity=Warning", 1)
+        ]),
+      Test.equals("the log writes events at or above its severity", &Sync.get(&lines), &Ok([
+            "[Warning] ExecutionAttempt source=orders/eu/retry operation=checkout attempt=0 duration=5 handled=true outcome=The operation failed: \"down\"",
+            "[Warning] OnRetry source=orders/eu/retry operation=checkout attempt=0 delay=10 outcome=The operation failed: \"down\"",
+            "[Error] ExecutionAttempt source=orders/eu/retry operation=checkout attempt=1 duration=5 handled=true outcome=The operation failed: \"down\"",
+            "[Warning] PipelineExecuted source=orders/eu operation=checkout duration=20 outcome=The operation failed: \"down\""
+          ])),
+      Test.equals("a source without names reads as unnamed", &Telemetry.sourceName(&unnamed), &"(unnamed)"),
+      Test.equals("severities rank from silent to critical", &[Telemetry.Silent, Telemetry.Debug, Telemetry.Information, Telemetry.Warning, Telemetry.Error, Telemetry.Critical].map(|level: Telemetry.Severity| Telemetry.rank(&level)), &[0, 1, 2, 3, 4, 5]),
+      Test.equals("every detail formats", &[
+          Telemetry.Opened(500, true), Telemetry.Closed(false), Telemetry.HalfOpened, Telemetry.Hedged(2), Telemetry.TimeoutElapsed(30),
+          Telemetry.Rejected(Some(7)), Telemetry.Rejected(None), Telemetry.LatencyInjected(9), Telemetry.FaultInjected, Telemetry.OutcomeInjected, Telemetry.BehaviorInjected, Telemetry.Executing
+        ].map(|detail: Telemetry.Detail| Log.format(&Telemetry.Event{name: "E", severity: Telemetry.Debug, source: unnamed, operationKey: None, outcome: None, detail: detail})), &[
+          "[Debug] E source=(unnamed) break=500 manual=true", "[Debug] E source=(unnamed) manual=false", "[Debug] E source=(unnamed)", "[Debug] E source=(unnamed) attempt=2",
+          "[Debug] E source=(unnamed) timeout=30", "[Debug] E source=(unnamed) retryAfter=7", "[Debug] E source=(unnamed)", "[Debug] E source=(unnamed) latency=9",
+          "[Debug] E source=(unnamed)", "[Debug] E source=(unnamed)", "[Debug] E source=(unnamed)", "[Debug] E source=(unnamed)"
+        ])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

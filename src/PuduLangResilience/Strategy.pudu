@@ -1,0 +1,41 @@
+/** @Resilience.Strategy.Contract — one layer of a resilience pipeline */
+module PuduLangResilience.Strategy
+
+import PuduLangResilience.Clock as Clock
+import PuduLangResilience.Context as Context
+import PuduLangResilience.Randomizer as Randomizer
+import PuduLangResilience as Resilience
+import PuduLangResilience.Telemetry as Telemetry
+
+/** @Resilience.Strategy.Callback — the work a layer guards */
+export type Callback[T, E] = fn(Context.Context) -> Resilience.Outcome[T, E]
+
+/** @Resilience.Strategy.Runtime — the effects a pipeline lends its layers */
+export type Runtime = { clock: Clock.Clock, randomizer: Randomizer.Randomizer, telemetry: Telemetry.Reporter }
+
+/** @Resilience.Strategy.Execute — runs a callback under one layer's policy */
+export type Execute[T, E] = fn(Runtime, Context.Context, Callback[T, E]) -> Resilience.Outcome[T, E]
+
+/** @Resilience.Strategy.Strategy — a named, validated policy layer */
+export type Strategy[T, E] = {
+  name: Option[Str],
+  kind: Str,
+  summary: Str,
+  problems: Array[Str],
+  attach: fn(Runtime) -> (),
+  execute: Execute[T, E]
+}
+
+/// A strategy of the given kind that runs `execute` around every callback. `name` identifies it
+/// in telemetry and must be unique within one pipeline.
+export fn custom[T, E](name: Option[Str], kind: Str, execute: Execute[T, E]) -> Strategy[T, E] {
+  Strategy{name: name, kind: kind, summary: kind, problems: [], attach: detached, execute: execute}
+}
+
+/// Keeps nothing of the runtime; the `attach` of a strategy that holds no state between calls.
+export fn detached(_runtime: Runtime) -> () { () }
+
+/// A runtime on the system clock and randomizer that reports nothing.
+export fn standalone() -> Runtime {
+  Runtime{clock: Clock.system(), randomizer: Randomizer.system(), telemetry: Telemetry.silent()}
+}
